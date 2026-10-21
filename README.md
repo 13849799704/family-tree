@@ -40,6 +40,7 @@
 |---|---|
 | 源码版本 | **v0.2.85**（`app/package.json`） |
 | 最近一次打包 | **v0.2.85** —— 含 F12 照片管理，`dist/` 里的 exe 与源码同版 |
+| 仓库 | [github.com/13849799704/family-tree](https://github.com/13849799704/family-tree) —— 公开仓库，MIT 协议 |
 | 平台 | Windows x64（Electron 44 + sql.js） |
 | 数据 | 纯本地 SQLite，不联网、不上传 |
 
