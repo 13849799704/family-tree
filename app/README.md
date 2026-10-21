@@ -1,436 +1,85 @@
-# 族谱软件 · 工程说明
-
-**PC 桌面应用**（Electron）+ **本地 SQLite 数据库**。核心是**称谓自动推导**：只录「谁是谁的爸妈」「谁和谁是夫妻」，称呼实时算出来 —— 关系改一处，全树称谓自动更新。
-
-数据只存你自己的硬盘上，不联网、不上传。
-
----
-
-## 一、怎么跑
-
-```bash
-cd app
-npm install          # 4 个包：electron(壳) + sql.js(SQLite 的 WASM 版) + html2canvas(导出图片) + electron-builder(打包)
-npm start            # 启动桌面应用
-npm run dist         # 打 Windows 安装包 + 免安装版 → D:\族谱pc端项目\dist\
-```
-
-首次启动会在 `D:\族谱pc端项目\数据\` 建库并载入示例家族。
-**没有 D 盘的机器**（打包给别人用时的常态）自动改放 `C:\Users\<用户名>\族谱数据\`，实际用了哪个会写进 `boot.log`。
-
-**换数据目录**：设环境变量 `GENOGRAM_DATA_DIR`，例如
-`GENOGRAM_DATA_DIR=E:\我的族谱 npm start`。
-
-**查一眼自己的库**（不启动应用）：
-
-```bash
-npm run db:inspect                    # 默认查「当前谱」的库
-npm run db:inspect -- "E:\某处\x.db"   # 指定库文件
-```
-
-打印人数、关系条数（血缘/婚配分开）、世次分布、meta、前 8 人。
-有多本谱时会一并列出清单并标出当前这本。
-
-### 网页版（只在开发调试时用）
-
-```bash
-npm run web          # 起静态服务器 → http://127.0.0.1:5173/index.html
-```
-
-同一套 `src/` 代码，存储自动退回 `localStorage`。
-调试参数：`?zoom=1.2&focus=p_p2s`（指定初始缩放 / 聚焦到某人）。
-
-> 网页版必须走 HTTP，不能双击 `index.html` —— 用的是原生 ES Module，`file://` 下浏览器会拦掉模块加载。
-> 桌面版没这个问题（`file://` 由 Electron 自己加载，且 `webSecurity` 行为不同）。
-
----
-
-## 二、目录结构与模块职责
-
-```
-app/
-├─ index.html            三栏骨架：顶栏 + 左导航轨(52px) + 画布 + 右详情面板(336px)
-├─ electron/             ★ 桌面壳（只有它能碰文件系统和数据库）
-│  ├─ main.js            主进程：建窗 / IPC / 菜单 / 启动日志 / 错误兜底 / 打包后自检
-│  ├─ preload.cjs        渲染层 ↔ 主进程 桥（contextBridge 白名单）
-│  ├─ db.js              SQLite 存储：建表、数据集↔表 映射、事务、原子落盘
-│  └─ paths.js           数据目录解析 + 备份策略（不 import electron，可单测）
-├─ build/                ★ 打包资源（不进应用包）
-│  ├─ icon.ico           应用图标（7 个尺寸，由 make-icon.py 生成，纯 Python 零依赖）
-│  ├─ make-icon.py       图标生成脚本：圆角方块 + 微缩族谱树，距离场 + 超采样抗锯齿
-│  └─ installer.nsh      NSIS 钩子：把安装目录默认值设到 D 盘
-├─ scripts/
-│  ├─ launch.js          启动包装：先清 ELECTRON_RUN_AS_NODE，再拉真 Electron
-│  └─ inspect-db.js      库文件检查器（不启动应用，直接看人数/关系/世次）
-├─ dev-server.js         零依赖静态服务器（网页版调试用，含目录穿越防护）
-├─ src/
-│  ├─ app.js             主控制器：状态、派生数据重算、事件接线、toast、错误兜底
-│  ├─ store.js           可插拔存储：桌面版走 SQLite 桥 ↺ 网页版走 localStorage
-│  ├─ core/              ★ 纯计算层，**零 DOM 依赖**，可直接在 Node 里单测
-│  │  ├─ model.js        数据规范化 + 建索引（byId / parentsOf / kidsOf / spouseOf）
-│  │  ├─ family.js       家族树划分（族源上溯 + 血缘下收 + 配偶并入）
-│  │  ├─ layout.js       布局算法：递归树形 + 父居中 + 全局 genY 映射
-│  │  ├─ kinship.js      称谓推导：LCA + 兄弟步压缩 + 姻亲多跳搜索 + 长幼/排行
-│  │  ├─ rules.js        称谓规则表（150+ 条，口语叫法）+ 排行前缀
-│  │  └─ diagnose.js     F8 自动体检（孤儿/成环/世次矛盾/排行/生卒/配偶不一致）
-│  ├─ ui/
-│  │  ├─ tree.js         TreeCanvas：节点渲染 + SVG 连线 + 缩放/拖拽/键盘
-│  │  ├─ panel.js        右侧详情面板（本地叫法 / 标准称呼 / 关系描述 三级）
-│  │  ├─ dialog.js       录入 / 编辑弹窗（**只收事实，不收称呼**）
-│  │  ├─ check.js        体检结果面板
-│  │  └─ icons.js        零依赖内联 SVG 图标集
-│  ├─ data/sample.js     36 人示例数据（含父系/母系/妻系三棵树）
-│  └─ styles/            tokens.css（设计 token）+ app.css
-└─ tests/
-   ├─ run.js             core 层单测（Node 直跑，94 项）
-   ├─ db.test.js         存储层单测（Node 直跑，37 项，**不需要 Electron**）
-   ├─ e2e.html           渲染层回归（真浏览器，53 项）
-   ├─ modal-overflow.html 弹窗溢出回归（无头可跑，15 项）
-   ├─ icon-size.html     图标尺寸回归（无头可跑，13 项，v0.2.75 新增）
-   ├─ topbar-layout.html 顶栏宽窄布局回归（无头可跑，30 项，v0.2.76 新增，v0.2.77 扩宽态，v0.2.78 防振荡，v0.2.79 窄态图标大小）
-   ├─ delete-flow.test.js 删除人员流程回归（真 Electron，28 项）
-   └─ electron-smoke.js  桌面版端到端（真 Electron，30 项，含截图）
-```
-
-### 架构原则
-
-| 原则 | 说明 |
-|---|---|
-| **依赖极少** | 运行时只有 3 个包：`electron`（壳）+ `sql.js`（SQLite）+ `html2canvas`（导出图片，v0.2.63 起）。没有框架、没有构建步骤。**`core/` 依旧零依赖**——html2canvas 只在渲染层用，`tests/run.js` 不需要 DOM |
-| **不联网** | 全程无网络请求，数据不出本机。`store.js` 只碰 IPC / localStorage |
-| **core 层无 DOM** | `core/*` 只吃数据结构、不碰 `document`，所以能在 Node 里直接单测 |
-| **关系不存储** | `dataset` 只存 `Person[]` + `relationships[]`（parent/spouse），称呼永远算出来 |
-| **未覆盖不猜** | 规则表匹配不到时输出「关系描述」兜底，绝不编造称呼（PRD §10） |
-| **进程隔离** | 只有主进程碰数据库；页面里没有 `require`/`fs`/`process`，能力全部经 preload 白名单 |
-
----
-
-## 三、本地数据库
-
-### 位置
-
-v0.2.24 起数据根目录里可以放**多本谱**（每本谱一个独立目录）：
-
-```
-D:\族谱pc端项目\数据\
-├─ library.json             谱清单：有几本、当前在用哪本
-├─ books\
-│  ├─ book-mv22zy6z-fxcg\     ← 一本谱 = 一个目录
-│  │  ├─ genogram.db         这本谱自己的库（标准 SQLite，任何工具都能打开）
-│  │  ├─ genogram.db.bak     上次退出时的状态
-│  │  ├─ backups\            该谱的每日快照，保留最近 30 份
-│  │  └─ photos\             该谱的照片（F12 待接入）
-│  └─ book-n3k9…\
-│     └─ …
-└─ trash\                    被删的谱目录挪到这里（**不真删**，可手工找回）
-```
-
-**为什么是一谱一目录，而不是一张库 + 一个 "book" 字段**：目录天然隔离，
-照片、自动备份、每日快照、磁盘布局全都跟着谱走，逻辑一行都不用改；
-而且「把这一本拷给亲戚」就是拷一个文件夹。
-
-**备份 = 直接拷贝那一本谱的文件夹。** 数据库不在应用目录里，卸载/重装应用不会丢数据。
-
-> 目录名是短 id（不是中文谱名），所以**改谱名不用动磁盘**。谱名只存在 `library.json` 里。
-
-### 从 v0.2.23 及以前升级
-
-老版本是「根目录直接躺着 `genogram.db`」。首次启动新版本时会自动把它搬进
-`books/<id>/genogram.db` 并登记为第一本谱 **「我的家族」**，内容逐字节不变。
-
-- **原件不删**：原文件改名为 `genogram.db.migrated-<日期>` 留在原地，随时能拷回来。
-- **只迁一次**：清单里一旦有谱就不再迁移，哪怕手贱把老文件复制回根目录。
-- 演练（拿真实数据在副本上算一遍，不动原件）：
-  ```bash
-  node scripts/check-migrate.js D:\族谱pc端项目\数据
-  ```
-
-### 表结构
-
-```sql
-people          -- 一人一行
-  id, name, sex, birth, death, alive, avatar, photos, note, place,
-  gen, order_no, privacy, expand
-
-relationships   -- 一条关系一行，parent / spouse 同一张表
-  id, a, b, type CHECK(type IN ('parent','spouse')),
-  from_date, to_date, source, confidence, note,
-  UNIQUE (a, b, type)
-
-meta            -- 版本、视角人、保存时间、schema_version
-  key, value
-```
-
-几个刻意的设计：
-
-- **`order` / `from` / `to` 是 SQL 关键字**，列名用 `order_no` / `from_date` / `to_date` 规避。
-- **`gen` / `order_no` 用可空整数** —— `0`（我辈 / 长子）和「没填」必须区分，不能都用 0。
-- **⚠️ 派生数据不落盘** —— `gen` 由双亲指针推导而来。推导值只活在内存里，
-  `serialize()` 在写出前会调 `stripDerivedGen()` 把它剥掉，只保留人工显式填的世次。
-  否则下次加载时它会被当成「人工显式值」优先采用，推导从此失效 ——
-  改了父母关系树却不跟着变，等于把派生数据固化成了事实来源，直接违反第一铁律。
-  `tests/run.js` 第 6 组有专门的回归测试盯着这件事。
-- **`type` 加了 CHECK 约束**，写错关系类型数据库会直接拒绝。
-- **照片暂存 JSON 文本**；等 F12 真做起来再拆 `photos` 表 + 文件存磁盘，避免把二进制塞进行里。
-
-### 为什么是 sql.js 而不是 better-sqlite3
-
-`better-sqlite3` 是原生模块，要针对 Electron 的 ABI 重编译，本机没有 VS Build Tools 会直接卡死。
-`sql.js` 是 SQLite 编译成 WASM，**零编译**，代价是整库常驻内存 —— 族谱这个量级（几百人 / 几 MB）完全无感。
-
-将来要换 better-sqlite3：**只改 `electron/db.js` 一个文件**，表结构、`store.js`、UI 全都不用动。
-
-### 写入的两条硬保证
-
-1. **事务**：每次保存是「清空 + 重建」放在一个 `BEGIN/COMMIT` 里。族谱量级下比逐行 diff 简单得多，而且天然一致 —— 不会出现「人删了、关系还在」的半截状态。写失败则 `ROLLBACK`，磁盘和内存都留在原样。
-2. **原子落盘**：先写 `genogram.db.tmp`，再 `rename` 覆盖主库。同卷 rename 是原子的，断电/崩溃最多丢掉最后一次保存，**不会写出半个损坏的库**。
-
-> 如果 `genogram.db` 被别的东西弄成 0 字节，应用会**明确报错并拒绝打开**（提示从 `backups\` 恢复），而不是把半截文件硬塞给 SQLite 抛一堆内部错。
-
-### 「空」有两种，必须分清楚
-
-空的数据库有两种完全不同的含义，混淆会出事故：
-
-| 情况 | 判定 | 应该怎么做 |
-|---|---|---|
-| **全新库**，从没写入过 | `meta.seeded` 不存在 | 载入示例家族，让人一打开就有东西看 |
-| **用户主动清空过** | `meta.seeded = 1` | **保持为空**，等他录自己的人 |
-
-以前只靠「people 表是不是空的」来判断，结果就是：用户点了「清空数据」→ 重启 → 36 人示例家族又回来了，
-清空按钮等于失灵。现在写过一次的库一律打上 `seeded` 标记（见 `db.js` 的 `META_SEEDED`），
-之后空着就是真的空着。网页版同理：清空的语义是**写入一份空数据集**，不是把 localStorage 的 key 删掉。
-
-> ⚠️ v0.2.24 起：新建一本谱时**即使选的是「空白谱」，也会立刻写入一份空数据集把 `seeded` 打上**
-> （见 `electron/main.js` 的 `lib:create`）。不打这个标记的话，重启后会被当成「全新库 → 灌示例家族」，
-> 「新建」这个动作直接失灵。`tests/book-flow.test.js` 第 2 组专门盯着它。
-
----
-
-## 四、测试
-
-```bash
-npm test             # core(94) + 存储(37) + 谱清单与网页版(29)，纯 Node，秒级
-npm run test:e2e     # 桌面版端到端（真 Electron，30 项，会弹一下窗口并截图）
-npm run test:book    # 多本谱端到端（真 Electron，30 项，**数据隔离**是重点）
-npm run test:edit    # 编辑弹窗「能不能改」回归（真 Electron，58 项，真实鼠标+键盘事件）
-npm run test:acc     # 系统级按键注入，验原生菜单 accelerator（真 Electron + keybd_event，7 项）
-npm run web          # 另开一个终端，然后跑渲染层回归
-```
-
-十套测试各管一件事：
-
-| 套件 | 跑在哪 | 项数 | 管什么 |
-|---|---|---|---|
-| `tests/run.js` | Node | 94 | 称谓引擎、布局、世次、体检、**派生数据不落盘**、**边界与破坏性输入** —— 产品逻辑的命根子 |
-| `tests/db.test.js` | Node | 37 | 表结构、往返无损、事务回滚、原子落盘、备份策略、**清空后不被示例覆盖**、**SQL 注入串存取** |
-| `tests/library.test.js` | Node | 29 | **族谱库清单 + 网页版回落**：全新安装建第一本谱、**老库迁移且不反复迁**、重名消歧、删谱进 trash、清单损坏可自愈、**localStorage 版多谱的数据隔离** |
-| `tests/book-flow.test.js` | 真 Electron | 30 | **多本谱端到端**：UI 新建空白谱、**在 B 谱录的人绝不能跑到 A 谱里**、切回原谱数据原封不动、**改名不能把数据改没**、删当前谱后自动落到剩下那本 |
-| `scripts/check-migrate.js` | Node | 只读演算 | 拿**真实数据在副本上**跑一遍老库迁移，逐项比对人数/关系/视角人/`seeded` 标记 |
-| `tests/e2e.html` | 浏览器 | 53 | 渲染层交互（含跨树姻亲称谓、录入流程、弹窗竞态、体检跳转放大居中） |
-| `tests/modal-overflow.html` | 无头浏览器 | 15 | **编辑弹窗小窗口溢出回归**（760×560 视口断言 flex/滚动/按钮可达） |
-| `tests/icon-size.html` | 无头浏览器 | 13 | **图标尺寸回归**：兜底对漏写规则的容器生效、**`.wires` 连线层不被兜底压扁**、组件级 `X svg` 压过兜底、v0.2.73/74 两处热点仍 14px |
-| `tests/topbar-layout.html` | 无头浏览器 | 30 | **顶栏宽窄布局回归**：品牌文字不纵向越出顶栏（默认 + 最坏组合）、谱名被 flex 压到 `max-width` 之下且有 3em 下限、**族谱库胶囊既不溢出外层也不内部装不下**、家族页签三个都在可视区内、**搜索结果浮层不被压扁的输入框带塌**（≥280px）且以搜索框左边缘展开、**窄态按钮降级后仍够点且不丢可访问名称**且降级可逆、**真实长度标签下 1024 与 1380 两档的搜索框文字区都 ≥40px**、**窄态判据读数与当前窄态无关**（防顶栏抖动）、**拖动式连续 resize 下状态净变化 ≤2 次**、**窄态 `Aa` 图标字高与邻近图标同量级且不撑出盒子** |
-| `tests/electron-smoke.js` | 真 Electron | 30 | 壳能不能起、preload 桥通不通、**数据真的落进 .db 了吗**、菜单动作 |
-| `tests/edit-dialog.test.js` | 真 Electron | 58 | **编辑弹窗到底能不能改**：真实鼠标事件戳每个控件、`elementFromPoint` 抓遮挡、IME 上屏、焦点归属、弹窗叠加/残留定时器、**弹窗内全局快捷键是否误触** |
-| `tests/delete-flow.test.js` | 真 Electron | 28 | **删除人员流程**：自绘确认框替代原生 `confirm()`、取消/拒绝删除/真删/物理按键仍有效、遮罩无残留（第 5 组用系统级物理按键守住原生 `confirm` 禁用，详见 `npm run test:delete`） |
-| `tests/acc-input.test.js` | 真 Electron + 系统级按键注入 | 7 | 原生菜单 accelerator 会不会吃掉输入框按键（**证伪裸键 F，同时守住这个结论**） |
-
-`electron-smoke.js` 的期望值都从示例数据**现算**（不写死人数）；它跑在临时沙箱目录里，
-**不会碰你真实的库**。失败时保留沙箱目录供复盘，成功则自动清理。
-
-> ⚠️ 为什么 `edit-dialog.test.js` 坚持用 `webContents.sendInputEvent` 而不是 `el.click()` / `el.value = 'x'`：
-> 后者测的是 DOM API 通不通，测不到「用户真实戳一下有没有反应」。
-> 弹窗内的一切都走真实鼠标/键盘事件（`isTrusted=true`），和人手同一条路径。
-
-> ⚠️ 但 `sendInputEvent` 有个**测不到的地方**：它直接把事件投递到渲染层，
-> 完全绕过 Windows 原生菜单的 accelerator 表 —— 而 accelerator 恰恰是在原生那层拦截的。
-> 要验 accelerator 必须用系统级注入（`user32.keybd_event`，见 `tests/acc-input.test.js`）。
-> 这也是当初「裸键 accelerator 吃掉字母 F」这个怀疑能被证伪的原因。
-
-> 上面六套跑的是**源码**。打包出来的安装包另有一套自检（`GENOGRAM_SELFTEST=1`），见 §六。
-
-> ⚠️ `tests/e2e.html` 用**离屏 iframe + 动态挂 src**，在**无头 Chrome** 下时序不可靠：
-> `--dump-dom` 常抓到「应用还没起来」的中间态，报一堆 `click of undefined` 的假失败
-> （`--virtual-time-budget` 只加速虚拟时钟，管不了 iframe 的真实网络加载）。
-> **请开真实浏览器跑**（`npm run web` 后访问 `/tests/e2e.html`）。
-> 无头环境要验渲染，直接 dump `index.html` 本体数节点更靠谱。
-
----
-
-## 五、原型文档的遗留决策（已定稿）
-
-早期原型（PRD / UI 设计稿 v1 / 预览 v1、v2）已随那批武汉背景文档删除，下面 7 条决策**早已在代码里定稿**，留此备查：
-
-| # | 议题 | 最终做法 |
-|---|---|---|
-| 1 | 卡片尺寸 | 原型 66px 未采用，现为 `--node-w: 76px` + `--sp-gap: 12px` → 配偶间距 88px |
-| 2 | 色板 | 采用对比度达 WCAG AA 的那套（`tokens.css`），父系/母系/姻亲三色 |
-| 3 | 连线色 | 血缘 `#a8b2c0`、婚配 `#d08a2e` |
-| 4 | 关系存储结构 | **一张** `relationships(a,b,type)` 表同时存 parent + spouse，不拆两张映射表（拆了反而挡住未来的收养 / 继嗣 `type`） |
-| 5 | `gen` 推导算法 | 从视角人 BFS 上溯取族源、向下推 `gen`、锚点 `gen = 0`；跨树姻亲归其原生树 |
-| 6 | 父母字段 | **父、母两个槽位**，落成两条 parent 边。单亲字段表达不了「有爸有妈」，与称谓引擎的 `F`/`M` 路径直接冲突 |
-| 7 | 存储位置与格式 | 跳过 JSON 中转，v1 直接上 **SQLite**（`sql.js`），示例数据首启即落库 |
-
----
-
-## 六、打包成安装包
-
-```bash
-npm run dist        # 完整构建：NSIS 安装包 + 免安装版
-npm run dist:dir    # 只打包不生成安装器（快，用来验证 asar 内容）
-```
-
-产物落在 `D:\族谱pc端项目\dist\`（**故意不放应用目录、更不放 C 盘**）：
-
-| 文件 | 说明 |
-|---|---|
-| `Genogram-Setup-0.2.23.exe` | **安装版**（约 106.8 MB）。安装目录在向导里自选，默认 `C:\Users\<用户名>\AppData\Local\Programs\家族谱` |
-| `Genogram-Portable-0.2.23.exe` | **免安装版**（约 106.6 MB）。双击就跑，适合放 U 盘随身带 |
-| `win-unpacked\` | 解包后的程序目录，调试用 |
-
-### 打包后必须验的三件事
-
-打包最容易「窗口能开、界面空白」，而且**只检查文件存在是发现不了的**。所以内置了自检开关：
-
-```bash
-# 不开窗口，把渲染层的实际结果写成 JSON 再退出
-GENOGRAM_SELFTEST=1 GENOGRAM_SELFTEST_OUT=D:\tmp\st.json GENOGRAM_DATA_DIR=D:\tmp\d 家族谱.exe
-```
-
-它回答三个问题：
-
-1. **ES Module 能不能从 asar 里走 `file://` 加载** —— 数 `.node` 节点数，加载失败就是 0
-2. **`sql.js` 的 WASM 能不能定位到** —— 看 `数据\books\<id>\` 里有没有真的生出 `genogram.db`
-   （v0.2.24 起每本谱独立存放，不再直接躺在数据根目录）
-3. **进程隔离还在不在** —— 页面里 `require` / `process` 必须都是 undefined
-
-### 第四件事：包里的代码和源码是不是同一份
-
-打包是某个时间点的快照，之后源码再改（或者像这次误删后从 asar 恢复），**安装包就和源码脱节了**。
-只看文件在不在、只看大小，都验不出来。所以加了个校验脚本：
-
-```bash
-node scripts/verify-asar.js                          # 默认比 win-unpacked 的 app.asar 和本目录
-node scripts/verify-asar.js <asar路径> <源码目录>
-```
-
-它按 sha256 逐文件比对，**业务代码（`src/`、`electron/`、`index.html`）只要有一个字节不同就退出码 1**。
-`package.json` 的差异会单独列出并忽略 —— electron-builder 打包时会重写它（剥掉 devDependencies / build 配置），属预期。
-
-脚本只读 asar、只读源码，输出一律走系统临时目录，**不会往项目目录写任何东西**。
-
-> 写这个脚本时踩的坑：asar 数据区起点是 `8 + headerBuf.length`，**不是** `16 + JSON 长度`
-> （JSON 后面有 4 字节对齐填充）。算错 1 字节的表现极具迷惑性 —— 提取出来的文件大小完全正确、
-> 内容只差一个换行，diff 几乎看不出来，但哈希对不上。
-
-### 体积优化（踩过的坑）
-
-`sql.js` 的 npm 包默认带了一堆用不上的东西：**debug 版 5.5 MB ×2、asm.js 版 1.3 MB ×3、还有 3 个 zip 包共 5 MB** —— 合计 21 MB，占 asar 的 98%。
-`package.json` 的 `build.files` 里用 `!` 排除了，**asar 从 20.64 MB 降到 0.32 MB**。
-
-另外两处刻意配置：
-
-- `asarUnpack` 只放行 `sql-wasm.wasm` —— WASM 作为独立文件躺在磁盘上，绕开「从 asar 里读二进制」的任何边界情况
-- `build.files` 里加了 `!_*` 和 `!**/*.log` —— 防止开发期的临时文件混进发布包（**第一次打包真混进去了**）
-
-### 默认安装目录（v0.2.50 起不再固定）
-
-**以前** `build/installer.nsh` 用 NSIS 的 `preInit` 钩子把默认安装目录写死成 `D:\族谱pc端项目\程序`
-（原理：`.onInit` 会优先读卸载项注册表里的 `InstallLocation`，而 `preInit` 在它之前执行，预写即可生效）。
-
-**现在去掉了**，原因：打包版是要**装到别人电脑上**用的，而别人的机器不一定有 D 盘。
-没有 D 盘（或 D 盘不可写）时 NSIS 建不出这个目录，结果就是
-**「安装向导走完了、桌面快捷方式也有，双击却毫无反应」** —— 快捷方式指向一个不存在的 exe。
-现在默认装到 `C:\Users\<用户名>\AppData\Local\Programs\家族谱`，用户在向导里可自选（`allowToChangeInstallationDirectory` 仍为 true）；
-数据目录本来就独立，卸载 / 重装 / 删程序都不会丢族谱。
-
-> **编码坑（踩了两次）**：`installer.nsh` **必须是 UTF-8 且带 BOM**。
-> electron-builder 传给 makensis 的主脚本是 UTF-8；include 的文件若没有 BOM，NSIS 按 ANSI 解析，
-> 里面的中文路径会变成乱码目录名（历史上真出过一次 `D:\WorkBuddy¶Ï嬱敁豰p`）；
-> 改存 GBK 更糟 —— 直接报 `Bad text encoding: installer.nsh:1`，整个构建中断。
-> 另外文件里不要出现 GBK/ASCII 之外的符号（emoji、⚠ 之类），否则同样会炸。
-
-### 国内网络打包（首次构建必看）
-
-首次 `npm run dist` 很可能卡成这样：
-
-```
-⨯ Timeout awaiting 'request' for 600000ms
-```
-
-原因：electron-builder 26 打包 Windows 目标时要下载工具集 `winCodeSign-2.6.0.7z`
-（里面的 `rcedit` 用来写 exe 的图标和版本信息），默认源是 GitHub Releases，国内直连会挂满 10 分钟超时。
-
-两个解法，任选其一：
-
-1. **让它走镜像**（推荐）：
-
-   ```bash
-   ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/ \
-   ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ \
-   npm run dist
-   ```
-
-2. **预置缓存**（之后可离线构建）：把 `winCodeSign-2.6.0.7z` 放到
-
-   `%LOCALAPPDATA%\electron-builder\Cache\winCodeSign-2.6.0\winCodeSign-2.6.0.7z`
-
-   并要求 SHA256 = `cdaec7154dda7cc31f88d886e2489379a0625a737d610b5ae7f62a12f16743a4`。
-   命中缓存后 electron-builder 直接解压，完全不碰网络。
-
-工具集缓存布局统一为 `<缓存目录>\<releaseName>\<文件名>`（`nsis-3.0.4.1`、`nsis-resources-3.4.1` 同理）。
-缓存与镜像都就绪时，一次完整构建约 **40 秒**（对比超时挂死的 10 分钟）。
-
----
-
-## 七、环境坑（本机实测，踩过就知道）
-
-| 症状 | 原因 | 处理 |
-|---|---|---|
-| `electron` 一启动就报 `Cannot read properties of undefined`，且报错栈写着 **Node.js vXX** | 会话里设了 `ELECTRON_RUN_AS_NODE=1`，Electron 会退化成纯 Node | 启动前 `unset ELECTRON_RUN_AS_NODE`（或用 `npm start`，npm 脚本里已清） |
-| **窗口永远不出现**，没有任何报错 | ESM 主入口下，Electron 要等**入口模块顶层求值全部结束**才发 `ready`；入口里有顶层 `await` 等窗口 → 死锁 | 入口顶层不要写 `await`，用 `.then()` 触发起步逻辑（见 `tests/electron-smoke.js` 注释） |
-| 满屏 `GPU process exited unexpectedly` → `FATAL: GPU process isn't usable. Goodbye.` 然后退出 | 本机 GPU 进程不稳定 | 默认已关硬件加速（软件渲染）。想开回去：`GENOGRAM_HW_ACCEL=1` |
-| 应用启动"卡死"不响应 | 主进程错误框是**阻塞式**的，会一直等点击 | 排障时设 `GENOGRAM_NO_DIALOG=1`（配合 `GENOGRAM_DEBUG=1` 看分步日志） |
-| **双击毫无反应、也没有任何提示** | 旧版的单实例锁失败只走 `console.error`（GUI 程序没有控制台）就退出；或崩在数据目录解析之前 —— 那时日志一个字都还没写 | v0.2.50 起会弹窗说明（已在运行 / 如何结束残留进程），且启动日志**第一时间落 `%TEMP%\族谱-boot.log`**，定下数据目录后再并进 `数据\boot.log`。别人电脑打不开，让他把 `boot.log` 发回来即可定位 |
-| 崩溃后没有日志可查 | 只记了正常启动的步骤，崩在窗口创建之后就没有下文 | v0.2.50 起有 `uncaughtException` / `render-process-gone` / `child-process-gone` 钩子，`type=gpu` 就是显卡加速进程崩了 |
-
-排障开关一览：
-
-```bash
-GENOGRAM_DEBUG=1        # 主进程分步日志（打印到 stderr，并写入数据目录 boot.log）
-GENOGRAM_NO_DIALOG=1    # 关掉阻塞式错误框
-GENOGRAM_HW_ACCEL=1     # 开回硬件加速
-GENOGRAM_DATA_DIR=...   # 换数据目录
-GENOGRAM_BOOT_LOG=...   # 指定启动日志路径
-```
-
----
-
-## 八、尚未实现（PRD 里已列、代码留了位置）
-
-| 编号 | 功能 | 现状 |
-|---|---|---|
-| F9 | 分支折叠 | 未做 |
-| F10 | 拼音 / 首字母搜索 | **v0.2.72 已做**：`lx`（首字母）与 `liming`（全拼）都能搜人，多音字两个读音都认；只做连续片段匹配，生僻字整条退出；拼音全等**不**允许回车直跳。另把匹配与排序下沉到 `core/search.js`，纳入 `tests/run.js` |
-| F11 | 导出图片 / PDF | **图片（PNG）v0.2.63 已做**：菜单「文件 → 导出图片…」或左栏图片按钮，只导**当前这一页**（别的家族不会出现在图上），清晰度二选一（1x / 2x）。**PDF 仍未做** |
-| F12 | 头像 / 照片管理 | 数据字段 `avatar` / `photos` 已预留，`photos\` 目录已建，UI 点了只提示「待接入」 |
-| F13 | 资料完整度提示 | 未做 |
-| — | 代码签名 | 未做。安装时 Windows SmartScreen 会拦一下（「未知发布者」），需点「更多信息 → 仍要运行」 |
-| — | 自动更新 | 未做 |
-| — | 收养 / 继嗣 | 按 PRD §3.3「v1 不做」，仅预留 |
-
-已实现：F1 族谱树、F2 点击查人、F3 称谓自动显示、F4 录入/编辑、F5 家族切换、F6 缩放拖拽、F7 搜索、F8 自动体检，
-桌面壳（窗口 + 菜单 + 系统对话框 + 本地 SQLite 库 + 每日备份），以及**打包成安装包**（NSIS 安装版 + 免安装版 + 应用图标）。
-
----
-
-*本说明随代码走，改代码请同步改这里。*
-
----
-
-## 九、更新日志
-
-> 本文件随代码走；此处只记「做了什么」，打包等技术细节见 §六。
+# 族谱软件 · 更新日志
+
+> **2026-10-21 起本文件只保留更新日志。** 工程说明（怎么跑 / 目录结构 / 数据库 / 测试 / 打包 /
+> 环境坑 / 待办）已迁到**仓库根 [`README.md`](../README.md)**。
+>
+> 阅读约定：下文出现的「§一」～「§九」指**根 `README.md` 的对应章节**（2026-10-21 重排后：
+> §0 这份文档怎么用 · §1 当前状态 · §2 快速开始 · §3 仓库结构 · §4 架构原则与设计定稿 ·
+> §5 本地数据库 · §6 测试 · §7 打包与发布 · §8 环境坑与排障 · §9 待办与未实现）；
+> 历史档案在根 `README.md` 的**附录 A**（不再有「§十」）。
+
+> 本文件随代码走；此处只记「做了什么」，打包等技术细节见根 `README.md` §7。
+
+### [2026-10-21] 重排根 README：工程说明 / 历史档案分层，去重并校正过期事实（v0.2.84）
+
+- **背景**：v0.2.82/0.2.83 把 `文档/` 与 `.workbuddy/memory/` 的内容合并进根 `README.md` 后，
+  全文变成「工程说明 + 设计定稿 + 历史档案」三层同权重，读者定位不到某一节该看哪块；
+  同一事实重复 3~4 处（测试命令、未实现清单、产物版本号、备份与数据目录），
+  章节编号与交叉引用也在合并过程中漂移（app/README 开头一度同时存在「§九」「§十」两套说法）。
+- **重排**：根 `README.md` 改为「§0 导航 + §1~§9 工程说明 + 附录 A 历史档案」——
+  §0 这份文档怎么用（三份文档分工 + 阅读路线）· §1 当前状态 · §2 快速开始 · §3 仓库结构与模块职责 ·
+  §4 架构原则与设计定稿（合并原「架构原则」与「原型遗留决策」）· §5 本地数据库 · §6 测试 ·
+  §7 打包与发布 · §8 环境坑与排障 · §9 待办与未实现 · **附录 A 历史档案（只增不改，新人可跳过）**。
+  逐版本明细仍只在本文件；需求真源仍在 `openspec/specs/`。
+- **去重**：命令清单只在 §2 给全量表、§6 只留测试命令与套件表；「未实现」只在 §1 概述 + §9 明细；
+  数据目录与备份只在 §2.1 说一次、§5.1 只讲结构。
+- **校正过期事实**：目录树补上此前漏列的 7 个真实文件（`core/search.js`、`core/export-image.js`、
+  `core/parentFilter.js`、`core/data/pinyin.js`、`electron/library.js`、`scripts/analyze-db.js`、
+  `scripts/check-export-scope.js`）；「十二套回归」改为「11 套回归 + 2 个专项脚本」；
+  补上此前只在长期记忆、README 里查不到的 `数据底稿/` 目录；
+  网页版标题改为「仅开发调试通道，不做正式网页版」。
+- **补齐打包章节**：新增 §7.1 打包前核对版本号、§7.2 本机必现 EPERM 的已验证解法
+  （`--config.electronDist` 指向本地已解压 electron 走纯复制分支 + 前提 `dist\win-unpacked` 须不存在），
+  并在 §8 排障表加对应一行。
+- **交叉引用**：本文件开头的阅读约定改为指向新章节号，并声明不再有「§十」。
+- **应用行为零变化**：纯文档重组，未改任何代码，未打包。
+- **版本**：`app/package.json` 0.2.83 → **0.2.84**。
+
+### [2026-10-21] 摘录合并 .workbuddy/memory 两份早期日志并删除：预览阶段方法论并入工程说明（v0.2.83）
+
+- **背景**：`.workbuddy/memory/` 是旧工具（workbuddy）留下的两份工作日志（2026-09-17 / 09-18，
+  项目诞生头两天：8 轮线框 + 预览 v1/v2 开发）。与 `文档/` 一样属历史记录清理范围。
+- **合并**：两份日志 266 行里，别处没有的增量约 30 行，收两处 ——
+  ① 「项目历程与历史档案」新增「预览阶段的方法论」：三条布局方法论（全局世次映射、显式锚点 +
+  血缘链传播优于推测算法、布局校验用单元边界 + 按主轴人过滤）、探针验证法（后来 `tests/` 无头回归的雏形）、
+  2026-09-18 已故角色「无法修改」排查结论（web 主流程无恙，真实瑕疵是开关文案，已修）；
+  ② §七 环境坑表补两行（沙箱吞 PowerShell 输出需落盘再读、bash 反引号 / `${...}` 展开陷阱）。
+  （这两处当时写的是「本文 §十 / §七」；同日文档搬家后，工程说明已迁到根 `README.md`，
+  「项目历程与历史档案」编为根 README 的 §九。）
+- **未保留**：v2 修复 1~12 的逐步过程（最终形态早已在 `core/layout.js` 与早期变更记录里）、
+  设计基线中被后续实现推翻的结论（参照人固定「我」→ 视角切换；D3/G6 → 零依赖 SVG；
+  武汉方言词库 → v0.2.23 起只留南阳）、PRD/规则表/UI 稿交付记录（那些文档已删）。
+- **删除**：`.workbuddy/memory/2026-09-17.md`、`2026-09-18.md` 及 `memory/` 目录已删
+  （`.workbuddy/` 空壳保留，工具自身目录）。⚠️ 这两个文件在 `.gitignore` 里、**从未进过版本控制，
+  删除不可恢复** —— 已按用户确认执行（摘录方案，接受过程细节消失）。
+- **应用行为零变化**：纯文档重组，未打包。
+- **版本**：`app/package.json` 0.2.82 → **0.2.83**。
+
+### [2026-10-21] 合并 文档/ 两份文档的必存内容并删除该目录：历程与档案并入工程说明（v0.2.82）
+
+- **背景**：`文档/` 下长期只留 `overview.md`（项目总览）与 `代码审查报告.md`（2026-09-18 审查存档），
+  其中测试表、技术决策、环境坑、文件清单等与工程说明逐节重复，数字还各错各的（本次同步文档时刚对齐过一轮）。
+  用户决定清空该目录，只把别处没有的内容并回来。
+- **合并**：新增「项目历程与历史档案」一节，收四块 ——
+  ① 阶段线 + 里程碑 M0~M9 + 历程六轮压缩版（原 `overview.md` 头部 / §七 / §一）；
+  ② 世次固化缺陷档案（原审查报告 §三：完整问题链、为何改在 `serialize()` 出口而非 `app.js`、
+  「退掉修复重跑确认测试会红 + 真实库只读体检」的验证范式）；
+  ③ 未闭环技术债及完整理由（原审查报告 §四：CSP 威胁模型与两个候选实现、`paths.js` TDZ、
+  配偶校验（注明 v0.2.6 起表单已不直接提交配偶边）、`layout.js` O(n²)）；
+  ④ 守住别退的工程实践（原审查报告 §六，其中「长幼看出生年」一条已按 v0.2.80 口径标注修订，
+  避免合并后自相矛盾）。
+- **未保留**（别处已有或已过时）：`overview.md` 的测试表 / 技术决策 / 环境坑 / 文件清单
+  （工程说明 §三 / §四 / §六 / §七 已有且更实时）；审查报告 §一 / §二 的 2026-09-18 验证数字
+  （快照，报告自带「勿当现状」声明）；审查报告 §五 小问题清单（压成「项目历程与历史档案」里
+  的一行指针，需要时查 git 历史）。
+- **引用处理**：历史日志条目里对 `文档/overview.md` 的引用按 v0.2.75 立下的规矩一律不回改，以本条为准；
+  根 `README.md` 目录结构表移除 `文档/` 行。
+- **删除**：`文档/overview.md` 与 `文档/代码审查报告.md` 已删，空目录一并移除。
+  两个文件都在 git 初始提交里，`git checkout -- 文档/` 可恢复。
+- **应用行为零变化**：纯文档重组，无代码改动，未打包。
+- **版本**：`app/package.json` 0.2.81 → **0.2.82**。
+- **后续（同日）**：工程说明整体迁到根 `README.md`，本文件只留更新日志 ——
+  「项目历程与历史档案」随之迁到根 README 的 §九。
 
 ### [2026-10-21] 建立版本控制并上传私有远端：构建输出相对化，clone 后可构建（v0.2.81）
 
@@ -2897,3 +2546,4 @@ GENOGRAM_BOOT_LOG=...   # 指定启动日志路径
   - `Genogram-Portable-0.2.0.exe`（免安装版，约 106.3 MB）
   - 均落在 `D:\族谱pc端项目\dist\`；用户数据目录 `D:\族谱pc端项目\数据\` 不进包。
 - 注：本次为事后补记，当天未走「先计划」流程；若当天另有其他改动，请在此追加。
+
