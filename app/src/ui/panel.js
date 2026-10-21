@@ -20,6 +20,7 @@ import { ICON } from './icons.js';
 import { describePath } from '../core/rules.js';
 import { displayLabel } from '../core/kinship.js';
 import { PRIVACY, GEN_LABEL, birthYear, displayName, avatarGlyph, missingFields } from '../core/model.js';
+import { cached, photoBridge } from '../core/photos.js';
 
 const BRANCH_CLASS = {
   direct: 'paternal',
@@ -91,11 +92,15 @@ export function renderPanel(el, ctx) {
   const mainCls = !showCall ? 'call-main call-main-name'
     : (unknown && !isSelf && !hasOverride ? 'call-main unknown' : 'call-main');
 
+  /* 主头像：avatar 存照片文件名，经缓存取 dataURL（与谱树同一通道）；
+     取不到 → 首字占位。文件缺失 / 网页版无桥都走这条回落。 */
+  const avatarSrc = p.avatar ? cached(p.avatar) : '';
+
   el.innerHTML = `
     <div class="panel-head">
       <div class="panel-head-top">
         <div class="panel-avatar" style="border-color:var(--${cls});color:var(--${cls});background:var(--${cls}-bg)">
-          ${p.avatar ? `<img src="${esc(p.avatar)}" alt="">` : esc(avatarGlyph(p))}
+          ${avatarSrc ? `<img src="${esc(avatarSrc)}" alt="">` : esc(avatarGlyph(p))}
         </div>
         <div class="panel-id">
           <div class="${mainCls}">${esc(callMain)}</div>
@@ -264,20 +269,46 @@ function sectionDerive(p, kin, isSelf, unknown) {
     </div>`;
 }
 
+/**
+ * 照片区（F12）：
+ *   · 最多 3 个照片槽，超出显示「+N」角标（点了开灯箱全览）
+ *   · 悬停照片出现「设为主头像 / 删除」
+ *   · 照片文件名经缓存取 dataURL；文件缺失 → 空槽（spec：降级，不显示破图）
+ *   · 没有本地文件桥（网页版）时**不渲染添加入口**（spec）
+ */
 function sectionPhotos(p) {
-  const photos = p.photos || [];
-  const slots = [0, 1, 2, 3];
+  const photos = (p.photos || []).filter(Boolean);
+  const shown = photos.slice(0, 3);
+  const extra = photos.length - shown.length;
+  const canAdd = !!photoBridge();
+
+  const cells = shown.map((name) => {
+    const src = cached(name);
+    if (!src) {
+      return `<div class="photo empty" title="照片文件缺失（磁盘上找不到这个文件）"></div>`;
+    }
+    return `
+      <div class="photo has" data-act="photo-open" data-id="${esc(p.id)}" data-name="${esc(name)}" title="点击查看原图">
+        <img src="${esc(src)}" alt="">
+        <span class="photo-acts">
+          <button type="button" class="photo-act" data-act="photo-avatar" data-id="${esc(p.id)}" data-name="${esc(name)}" title="设为主头像">${ICON.avatar}</button>
+          <button type="button" class="photo-act" data-act="photo-delete" data-id="${esc(p.id)}" data-name="${esc(name)}" title="删除照片">${ICON.trash}</button>
+        </span>
+      </div>`;
+  }).join('');
+
+  /* 第 4 格：超出 →「+N」；能添加 → 虚线「＋」；否则补空槽（网格恒 4 格） */
+  const last = extra > 0
+    ? `<button type="button" class="photo more" data-act="photos-all" data-id="${esc(p.id)}" title="查看全部 ${photos.length} 张照片">+${extra}</button>`
+    : canAdd
+      ? `<button type="button" class="photo add" data-act="add-photo" data-id="${esc(p.id)}" title="添加照片（照片保存在本地）">${ICON.image}</button>`
+      : '<div class="photo empty"></div>';
+
+  const pads = '<div class="photo empty"></div>'.repeat(Math.max(0, 3 - shown.length));
+
   return `
     <div class="sec-title">照片</div>
-    <div class="photos">
-      ${photos.slice(0, 3).map((src) => `
-        <div class="photo"><img src="${esc(src)}" alt=""></div>
-      `).join('')}
-      ${slots.slice(photos.length, 4).map(() => `<div class="photo empty"></div>`).join('')}
-      <button class="photo add" data-act="add-photo" data-id="${esc(p.id)}" title="添加照片（照片保存在本地）">
-        ${ICON.image}
-      </button>
-    </div>`;
+    <div class="photos">${cells}${pads}${last}</div>`;
 }
 
 /* ========================================================= */

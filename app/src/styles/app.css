@@ -802,6 +802,80 @@ button { cursor: pointer; border: 0; background: none; }
 .photo.add { border-style: dashed; }
 .photo.empty { background: repeating-linear-gradient(45deg, var(--bg-sunken), var(--bg-sunken) 6px, #e7ebf1 6px, #e7ebf1 12px); }
 
+/* F12：有图的格子 —— 悬停浮出「设为主头像 / 删除」，点击看原图 */
+.photo.has { position: relative; cursor: zoom-in; }
+.photo-acts {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; justify-content: flex-end; gap: 4px; padding: 4px;
+  background: linear-gradient(to top, rgba(15, 20, 25, .55), transparent);
+  opacity: 0; transition: var(--t-fast);
+}
+.photo.has:hover .photo-acts { opacity: 1; }
+.photo-act {
+  width: 22px; height: 22px; padding: 0; border: none; border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, .92); color: var(--ink-700);
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.photo-act svg { width: 13px; height: 13px; }
+.photo-act:hover { background: #fff; color: var(--ink-900); }
+/* 超出 3 张时的「+N」角标 */
+.photo.more { font-size: var(--fs-md); font-weight: var(--fw-semibold); color: var(--ink-500); cursor: pointer; }
+
+/* 照片灯箱（grid 全览 + 单张大图）
+   ⚠️ 选择器必须写 .modal.modal-photo：单写 .modal-photo 与 .modal 同为 (0,1,0)，
+   而 .modal 在本文件更靠后（962 行）—— 同特异性源码顺序决胜，宽度会被它按 560px 压掉。
+
+   尺寸口径（用户 2026-10-21 四轮反馈：「太小不过瘾」→「随窗口放大而放大」
+   → 「缩到最小时用第一版那样」→「拖动窗口时别突然变大」）：
+   · **全程连续公式，不用媒体查询断点** —— 媒体查询是二值的，跨过断点那一下
+     整档跳变，拖窗口时最扎眼；改成公式后每一像素都是渐变的。
+   · 宽 = clamp(680px, 100vw - 344px, 1280px)：最小窗口 1024px 时正好是
+     第一版的 680px，之后与窗口 1:1 增长，1280px 封顶（超宽屏上再大就是空镜框）。
+   · 高 = 94vh；图片 = clamp(340px, 100vh - 240px, 84vh)：
+     减去固定开销（头 46 + 底栏 56 + body 内边距 40 ≈ 142px），窗口再小也不出滚动条。 */
+.modal.modal-photo {
+  width: clamp(680px, calc(100vw - 344px), 1280px);
+  max-height: 94vh;
+}
+.photo-grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-2);
+  /* 3 列 × 240px + 间隙 = 736px 封顶：格子不跟着弹窗无限变大，
+     小窗口下也就两行高，不会把全览撑出滚动条。 */
+  max-width: 736px; margin: 0 auto;
+}
+
+/* 导出弹窗的「包含照片」勾选行 */
+.check-row {
+  margin-top: var(--sp-3);
+  display: flex; align-items: center; gap: var(--sp-2);
+  font-size: var(--fs-md); color: var(--ink-700);
+  cursor: pointer; user-select: none;
+}
+.check-row input { width: 15px; height: 15px; margin: 0; accent-color: var(--primary-600); cursor: pointer; }
+.photo-cell {
+  aspect-ratio: 1; border-radius: var(--r-md); overflow: hidden;
+  border: 1px solid var(--line-200); background: var(--bg-sunken);
+  padding: 0; cursor: zoom-in; position: relative;
+}
+.photo-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-cell-missing { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--ink-500); font-size: var(--fs-md); }
+/* 舞台底高必须随视口走：写死 440px 时，窗口一小这个「画框」还硬撑着，
+   大图被挤出可视区，modal-body 就冒出滚动条（用户 2026-10-21 报的）。
+   min-height 是地板不是天花板 —— 图比地板高时舞台跟着长。 */
+.photo-stage { display: flex; align-items: center; justify-content: center; min-height: min(440px, 40vh); }
+/* 图片封顶 = 视口高减去弹窗内的固定开销（头 46 + 底栏 56 + body 内边距 40 ≈ 142px），
+   下限 340px 保证小窗口里也还看得出是个「详情」，上限 84vh 防超高。 */
+.photo-full { max-width: 100%; max-height: clamp(340px, calc(100vh - 240px), 84vh); border-radius: var(--r-md); }
+.photo-foot-spacer { flex: 1; }
+/* 灯箱头部 / 底栏都做窄一档：看图器要的是画面，不是大标题栏
+   （用户 2026-10-21：「标题白边太大，小小的就行」）。
+   .modal-head 默认 20/24px 内边距 + 18px 标题是给表单弹窗的，这里压到 12/20 + 15px。
+   省下的高度直接还给图片。 */
+.modal-photo .modal-head { padding: var(--sp-3) var(--sp-5); }
+.modal-photo .modal-title { font-size: var(--fs-lg); }
+.modal-photo .modal-foot { padding: var(--sp-3) var(--sp-5); }
+
 /* 面板底部操作 */
 .panel-foot {
   padding: var(--sp-3) var(--sp-5) var(--sp-5);

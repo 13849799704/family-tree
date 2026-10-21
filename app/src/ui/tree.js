@@ -23,6 +23,7 @@ import { ICON } from './icons.js';
 import { LAYOUT } from '../core/layout.js';
 import { displayLabel } from '../core/kinship.js';
 import { displayName, avatarGlyph, missingFields } from '../core/model.js';
+import { cached } from '../core/photos.js';
 
 const WIRE_BLOOD = '#a8b2c0';
 const WIRE_MARRY = '#d08a2e';
@@ -476,8 +477,12 @@ export class TreeCanvas {
         ? ((kin && kin.ok) || hasOverride ? 'node-call' : 'node-call unknown')
         : 'node-call node-call-name';
 
-      const avatarInner = p.avatar
-        ? `<img src="${esc(p.avatar)}" alt="">`
+      /* 头像：avatar 字段存的是照片文件名（F12 起）。经缓存取 dataURL 再上 DOM
+         —— 绝不直接拿字段值当 src（那会是 file://，会污染导出画布）。
+         取不到（没设 / 文件缺失 / 网页版无桥）→ 回落首字占位。 */
+      const avatarSrc = p.avatar ? cached(p.avatar) : '';
+      const avatarInner = avatarSrc
+        ? `<img src="${esc(avatarSrc)}" alt="">`
         : avatarGlyph(p);
 
       const todo = missingFields(p).length
@@ -607,6 +612,20 @@ export class TreeCanvas {
       el.setAttribute('aria-label', `${displayName(p)}${p.alive === false ? '，已故' : ''}`);
     }
 
+    /* 【头像：把圆形裁切「烙进图片」，导出里才不会有花边】
+       html2canvas 裁圆是**硬裁路径**（没有抗锯齿）：屏幕上是浏览器原生渲染，
+       边缘丝滑；一导出那一圈就成锯齿，1x 看不出、放大满圈毛边。
+       再加上头像那圈 box-shadow —— html2canvas 画阴影是近似的（多次偏移叠出来），
+       等于在锯齿外面又套了一圈模糊环，两层叠一起就是用户说的「花边」。
+
+       解法：在 canvas 上把「照片 + 描边环」画成一张带透明角的方图 PNG
+       （arc 自带抗锯齿），再把副本里的圆角 / 边框 / 投影全撤掉 ——
+       html2canvas 拿到的就是一张干净的方图，边缘是 PNG 自带的平滑 alpha。
+       ⚠️ 烘焙的**时机**很要紧：必须等副本进了文档（getComputedStyle 对脱离
+       文档的元素返回空值，描边宽度与颜色会取空，圆环就画不出来 —— 用户反馈
+       「外层的圆圈没了」），也必须在改色之后（环的颜色要跟卡片配色一致）。
+       调用点见本函数末尾。 */
+
     /* 【导出图的配色：按「本页锚点」重算，而不是按「我」】
        屏幕上的配色永远是相对视角人（默认「我」）算的 —— 这是**浏览**时要的，
        它回答的是「谁离我近、谁是我的姻亲」。
@@ -636,8 +655,91 @@ export class TreeCanvas {
     await svgToImage(clone);
 
     document.body.appendChild(root);
+
+    /* 头像烘焙放最后：① 副本必须已在文档里，getComputedStyle 才给得出
+       描边宽度与颜色（脱离文档时全是空值 → 圆环画不出来）；
+       ② 也必须在改色之后，环的颜色才跟卡片配色一致。 */
+    await bakeAvatars(clone);
+
     return { el: root, dispose: () => root.remove() };
   }
+}
+
+/**
+ * 把导出副本里所有头像照片的圆形裁切「烙进图片」。
+ *
+ * 为什么不能靠 CSS：html2canvas 裁圆（border-radius）是**硬裁路径**，
+ * 没有抗锯齿 —— 屏幕上浏览器原生渲染边缘丝滑，导出那一圈却是锯齿；
+ * 再叠上头像的 box-shadow（html2canvas 的阴影是近似的模糊环），
+ * 放大后就是用户说的「边缘很多花边」。
+ *
+ * 这里改成：canvas 的 arc 裁出照片圆（arc 自带抗锯齿），再描一圈原边框色，
+ * 整张存成带透明角的 PNG 换进去；容器上的圆角 / 边框 / 投影一并撤掉。
+ * 失败就保持原样 —— 顶多是锯齿，绝不能因此让整张导出图失败。
+ */
+async function bakeAvatars(scope) {
+  const avatars = [...scope.querySelectorAll('.node .avatar')];
+  if (!avatars.length) return;
+  await Promise.all(avatars.map(async (av) => {
+    const img = av.querySelector('img');
+    if (!img) return;                                  // 首字占位的头像不用处理
+    const url = img.getAttribute('src') || '';
+    if (!url.startsWith('data:image')) return;
+    try {
+      const src = new Image();
+      src.src = url;
+      await new Promise((resolve, reject) => {
+        src.onload = resolve;
+        src.onerror = reject;
+      });
+
+      /* 头像在树上显示 60px，导出按 2 倍渲染 = 120 设备像素；
+         192 留足余量，缩下去依旧锐。 */
+      const S = 192;
+      const cv = document.createElement('canvas');
+      cv.width = S;
+      cv.height = S;
+      const ctx = cv.getContext('2d');
+
+      const cs = getComputedStyle(av);
+      const borderW = (parseFloat(cs.borderTopWidth) || 0) * (S / 60);
+      const r = S / 2 - borderW;
+
+      // 照片：圆形裁切（arc 抗锯齿）
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(S / 2, S / 2, r, 0, Math.PI * 2);
+      ctx.clip();
+      // 源图按 object-fit: cover 的口径居中铺满（源图一般是方的，比例相同）
+      const sw = src.naturalWidth || S;
+      const sh = src.naturalHeight || S;
+      const scale = Math.max(S / sw, S / sh);
+      const dw = sw * scale;
+      const dh = sh * scale;
+      ctx.drawImage(src, (S - dw) / 2, (S - dh) / 2, dw, dh);
+      ctx.restore();
+
+      // 描边环：颜色取自原样式（各亲缘色不同）
+      if (borderW > 0) {
+        ctx.beginPath();
+        ctx.arc(S / 2, S / 2, r + borderW / 2, 0, Math.PI * 2);
+        ctx.strokeStyle = cs.borderTopColor;
+        ctx.lineWidth = borderW;
+        ctx.stroke();
+      }
+
+      const baked = document.createElement('img');
+      baked.src = cv.toDataURL('image/png');
+      baked.style.cssText = 'width:100%;height:100%;display:block;border-radius:0;';
+      img.replaceWith(baked);
+
+      // 容器上的圆角 / 边框 / 投影全撤 —— 圆已经在图里了
+      av.style.borderRadius = '0';
+      av.style.border = 'none';
+      av.style.boxShadow = 'none';
+      av.style.background = 'transparent';
+    } catch { /* 保持原样 */ }
+  }));
 }
 
 /**

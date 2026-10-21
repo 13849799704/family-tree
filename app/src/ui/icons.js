@@ -39,6 +39,7 @@ export const ICON = {
   /* ---------- 画布 ---------- */
   chevronDown: wrap('<path d="M6 9l6 6 6-6"/>', { sw: 3 }),
   chevronLeft: wrap('<path d="M15 18l-6-6 6-6"/>', { sw: 2.4 }),
+  chevronRight: wrap('<path d="M9 18l6-6-6-6"/>', { sw: 2.4 }),
   target: wrap('<circle cx="12" cy="12" r="3"/><path d="M12 5V3M12 21v-2M5 12H3M21 12h-2"/>', { sw: 2.2 }),
   dead: wrap('<path d="M18 6L6 18M6 6l12 12"/>', { sw: 3 }),
   avatar: wrap('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>', { sw: 2 }),

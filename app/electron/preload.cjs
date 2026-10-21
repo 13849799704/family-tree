@@ -124,6 +124,33 @@ contextBridge.exposeInMainWorld('genogramFS', {
   /** 在资源管理器里打开数据目录 */
   openDataDir: () => ipcRenderer.invoke('app:open-data-dir'),
 
+  /* ---- v0.2.85：照片（F12）----
+     桌面版才有；网页版（无桥）下整个 photos 是 undefined，
+     渲染层据此降级（不渲染添加入口，见 specs/photo-management）。
+     六方法与 design D7 的表一一对应，返回结构见各 handler。 */
+  photos: {
+    /** 系统多选对话框 → 复制 + 校验 + 缩略图。{ok, added[], rejected[]} | {ok:false, canceled} */
+    add: (personId) => ipcRenderer.invoke('photo:add', { personId }),
+
+    /** 缩略图 dataURL（缺失回落原图）。{ok, dataUrl, thumb} | {ok:false, error} */
+    thumb: (name) => ipcRenderer.invoke('photo:thumb', { name }),
+
+    /** 原图 dataURL。{ok, dataUrl, thumb:false} | {ok:false, error} */
+    original: (name) => ipcRenderer.invoke('photo:original', { name }),
+
+    /** 删（连缩略图）。{ok, removed[], errors[]} */
+    remove: (names) => ipcRenderer.invoke('photo:remove', { names }),
+
+    /** 批量读（导出用）。{ok, map, missing[]} */
+    readMany: (names) => ipcRenderer.invoke('photo:readMany', { names }),
+
+    /** 批量查存在性（导入后报缺失数用）。{ok, existing[]} */
+    exists: (names) => ipcRenderer.invoke('photo:exists', { names }),
+
+    /** 恢复内联照片（导入用）。{ok, written[], skipped[], errors[]} */
+    restore: (map) => ipcRenderer.invoke('photo:restore', { map }),
+  },
+
   /** 告诉主进程「现在正在弹窗里编辑」，让它禁用会捣乱的原生菜单项。
    *  单向通知，没有返回值 —— 只在 overlay 的 .on 类变化时才发。 */
   setEditing: (on) => ipcRenderer.send('ui:editing', !!on),

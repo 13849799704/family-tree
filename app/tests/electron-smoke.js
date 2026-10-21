@@ -33,6 +33,11 @@ import { fileURLToPath } from 'node:url';
 import electron from 'electron';
 const { app, BrowserWindow } = electron;
 
+import { ensureLibrary, createBook } from '../electron/library.js';
+import { GenogramStore } from '../electron/db.js';
+import { dbFile, bookDir, photosDir } from '../electron/paths.js';
+import { normalizeDataset } from '../src/core/model.js';
+
 /* ---------- 1. 数据目录指向临时沙箱（必须在 import main 之前设置） ---------- */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -42,9 +47,78 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'genogram_e2e_'));
 process.env.GENOGRAM_DATA_DIR = sandbox;
 process.env.GENOGRAM_NO_DIALOG = '1';   // 关掉阻塞式错误框（否则测试假死）
 process.env.GENOGRAM_DEBUG = '1';       // 打开主进程分步日志
+/* 跳过单实例锁：应用开着的时候冒烟不该秒退 —— 它跑的是独立沙箱目录，
+   跟用户真库毫无关系（没有这个开关时，用户一边开着应用一边跑冒烟，
+   只会看到「已有实例在运行，本实例退出」然后什么都没发生）。 */
+process.env.GENOGRAM_NO_SINGLE_INSTANCE = '1';
 
 const BOOT_LOG = path.join(sandbox, 'boot.log');
 process.env.GENOGRAM_BOOT_LOG = BOOT_LOG;
+
+/* ---------- 1.5 照片链路的预置数据（F12） ----------
+   应用**启动前**在沙箱里预置第二本谱「照片谱」：DB 里存照片引用、
+   photos/ 目录里放文件（pme-zzz999.png 故意不放 → 测缺失降级）。
+   第一本谱留空 → 启动走「首次运行 → 示例」老路，前面各组的断言不受影响。 */
+
+/** 两张不同的 1×1 PNG（A/B 内容不同，好对数据做区分） */
+const PNG_A = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64'
+);
+const PNG_B = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkZ-mfHwAAABJRU5ErkJggg==',
+  'base64'
+);
+
+const PHOTO_FILES = {
+  'pme-abc123.png': PNG_A,
+  'pme-def456.png': PNG_B,
+  'pme-g1.png': PNG_A,
+  'pme-g2.png': PNG_B,
+  'pme-g3.png': PNG_A,
+  'pme-g4.png': PNG_B,
+  'pme-g5.png': PNG_A,
+  // 'pme-zzz999.png' 故意缺席 —— 库里有引用、磁盘没文件
+};
+
+/** 预置「照片谱」，返回 { id, photosDir } 供断言用 */
+async function seedPhotoBook() {
+  ensureLibrary(sandbox);            // 建默认第一本（空）
+  const made = createBook(sandbox, '照片谱');
+  const dir = bookDir(sandbox, made.book.id);
+  const pdir = photosDir(dir);
+  fs.mkdirSync(pdir, { recursive: true });
+  for (const [name, buf] of Object.entries(PHOTO_FILES)) {
+    fs.writeFileSync(path.join(pdir, name), buf);
+  }
+  const store = await GenogramStore.open(dir);
+  store.writeDataset(normalizeDataset({
+    version: '1.0',
+    viewpoint: 'p_me',
+    people: [
+      {
+        id: 'p_me', name: '林然', sex: 'M', birth: '1992', gen: 0, order: 1,
+        avatar: 'pme-abc123.png',
+        photos: ['pme-abc123.png', 'pme-def456.png'],
+      },
+      {
+        id: 'p_bro', name: '林涛', sex: 'M', birth: '1988', gen: 0, order: 0,
+        photos: ['pme-g1.png', 'pme-g2.png', 'pme-g3.png', 'pme-g4.png', 'pme-g5.png'],
+      },
+      {
+        // 引用了一个磁盘上不存在的文件 → 界面必须降级为空槽
+        id: 'p_f', name: '林志远', sex: 'M', birth: '1963', gen: 1,
+        photos: ['pme-zzz999.png'],
+      },
+    ],
+    relationships: [
+      { a: 'p_f', b: 'p_me', type: 'parent', confidence: 'high' },
+      { a: 'p_f', b: 'p_bro', type: 'parent', confidence: 'high' },
+    ],
+  }));
+  store.persist();
+  return { id: made.book.id, photosDir: pdir };
+}
 
 /* ---------- 2. 极简断言框架 ---------- */
 
@@ -108,6 +182,40 @@ async function runSmoke() {
   }
 
   const js = (code) => wc.executeJavaScript(code, true);
+
+  /* js() 加超时：渲染层卡住时，测试要**失败**而不是永远挂着 ——
+     挂住的测试比失败的测试难查得多（它连「卡在哪一步」都不说）。
+     消息里带上代码片段，好定位是哪一行。 */
+  const jsT = async (code, ms = 20000) => {
+    let timer;
+    try {
+      return await Promise.race([
+        wc.executeJavaScript(code, true),
+        new Promise((_, rej) => {
+          timer = setTimeout(() => rej(new Error(
+            `渲染层 ${ms / 1000} 秒没回话（卡住了）：${String(code).replace(/\s+/g, ' ').slice(0, 90)}…`
+          )), ms);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  /** 步骤标记：出问题时最后一条标记就是卡住的位置 */
+  const step = (t) => console.log(`\x1b[36m· ${t}\x1b[0m`);
+
+  /** 等某个条件成立（最多 timeout 毫秒）—— 比死等固定毫秒稳得多 */
+  const waitFor = async (fn, timeout = 2000, gap = 60) => {
+    const t0 = Date.now();
+    for (;;) {
+      try {
+        if (await fn()) return true;
+      } catch { /* 条件查询本身出错：当成还没满足，继续等 */ }
+      if (Date.now() - t0 > timeout) return false;
+      await tick(gap);
+    }
+  };
 
   try {
     head('1. 进程与壳');
@@ -237,7 +345,9 @@ async function runSmoke() {
     ok(await js(`!document.getElementById('overlay').classList.contains('on')`),
       'Esc 能关掉弹窗（取消不会去拉另存为框）');
     await tick(320);
-    ok(await js(`!document.querySelector('.modal[aria-label="导出范围"]')`),
+    /* 死等 320ms 会在机器一忙时误报（弹窗自己排的是 220ms 定时器，
+       渲染层一卡就延后）。改成轮询等条件成立，最多 2 秒。 */
+    ok(await waitFor(() => js(`!document.querySelector('.modal[aria-label="导出范围"]')`), 2000),
       '淡出结束后弹窗 DOM 已清干净');
 
     head('3c. 「只显示姓名」开关（默认关 = 与以前一模一样）');
@@ -469,6 +579,13 @@ async function runSmoke() {
           rewritten++;
         }
         if (callEl && name && callEl.textContent.trim() !== name) callLeaked++;
+        /* ⚠️ 这里**必须真的删掉**小字姓名行（tree.js 的 mountExportSnapshot
+           里是 el.querySelector('.node-name')?.remove()）——
+           本文件是照抄那套导出步骤的复刻版，之前只数没删，副本里留着
+           20 张小字姓名行，于是「没有卡片还留着小字姓名行」这条一直是红的。
+           ⚠️ 复刻会漂移：tree.js 改了导出步骤，这里要跟着改（更好的做法是
+           哪天让测试直接调 tree.js 的真函数，别再手抄）。 */
+        nameEl?.remove();
         if (n.querySelector('.node-name')) smallLeft++;
         if (clone.querySelectorAll('.node-call.unknown').length) unknownLeft++;
       }
@@ -696,10 +813,205 @@ async function runSmoke() {
     ok(!/导出图片失败|Error|失败/.test(imgToast), `导出过程无报错（toast：${imgToast || '空'}）`);
 
     head('10. 截图存档');
-    const pngShot = await wc.capturePage();
-    const out = path.join(APP_ROOT, 'preview-desktop.png');
-    fs.writeFileSync(out, pngShot.toPNG());
-    ok(fs.statSync(out).size > 10000, `截图已保存（${(fs.statSync(out).size / 1024).toFixed(0)} KB）→ ${out}`);
+    /* 截图只是产出 preview-desktop.png 这张存档图，**不承担任何断言**。
+       但它有两个坑，try/catch 只挡得住其中一个：
+         ① 抛错：软件渲染下偶发 UnknownVizError（合成器快照失败）；
+         ② **永不返回**：同样在软件渲染下，capturePage 有时既不 resolve 也不 reject，
+            整个冒烟就停在这里（应用其实活得好好的，只是测试在等一个不会来的结果）。
+       所以：既加超时，也接住抛错 —— 截不成就记一条说明，继续往下跑，
+       后面新加的断言组才有资格执行。 */
+    try {
+      const pngShot = await Promise.race([
+        wc.capturePage(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('capturePage 10 秒没回来')), 10000)),
+      ]);
+      const out = path.join(APP_ROOT, 'preview-desktop.png');
+      fs.writeFileSync(out, pngShot.toPNG());
+      ok(fs.statSync(out).size > 10000, `截图已保存（${(fs.statSync(out).size / 1024).toFixed(0)} KB）→ ${out}`);
+    } catch (e) {
+      L.push('SKIP  截图没截到（不影响其余断言）：' + (e?.message || e));
+      console.log(`\x1b[33m!\x1b[0m 截图没截到，跳过（不影响其余断言）：${e?.message || e}`);
+    }
+
+    /* ========================================================
+       照片链路（F12）—— 切到预置的「照片谱」，走完整交互：
+       渲染（dataURL）→ 灯箱 → 设主头像 → 删除（含头像一致性）
+       → 缺失降级 → +N → restore/readMany IPC → 导出 PNG 不污染画布
+       ======================================================== */
+    head('12. 照片链路（F12：渲染 / 灯箱 / 主头像 / 删除 / 降级 / 导出）');
+
+    step('切到预置的「照片谱」');
+    /* 诊断式点击：找不到菜单项时**报告差异**（要哪个 id、实际有哪些），
+       而不是让 querySelector 返回 null 后 .click() 抛一个 TypeError ——
+       那种报错既没说清哪一步，也看不出差在哪。 */
+    const menuProbe = await jsT(`(() => {
+      document.getElementById('bookChip').click();
+      const ids = [...document.querySelectorAll('#bookMenu [data-book-id]')].map((e) => e.dataset.bookId);
+      const hit = document.querySelector('#bookMenu [data-book-id="${photoBook.id}"]');
+      if (hit) { hit.click(); return 'CLICKED ' + hit.dataset.bookId; }
+      return 'NOT_FOUND want=${photoBook.id} have=' + ids.join(',');
+    })()`).catch((e) => 'PROBE_FAILED ' + (e?.message || e));
+    ok(String(menuProbe).startsWith('CLICKED'),
+      `切到预置的「照片谱」（${menuProbe}）`);
+    await tick(1800);   // 切谱 + applyBookSwap + warmPhotos 的 IPC 往返
+
+    /* ---- 渲染：谱树头像与面板照片都是 dataURL（不是 file://） ---- */
+    step('检查渲染');
+    const treeAvatar = await jsT(`(() => {
+      const img = document.querySelector('#canvas .node[data-id="p_me"] .avatar img');
+      return img ? img.getAttribute('src') : '';
+    })()`);
+    ok(String(treeAvatar).startsWith('data:image/png;base64,'),
+      `谱树头像渲染为 dataURL（${String(treeAvatar).slice(0, 30)}…）`);
+
+    const panelAvatar = await jsT(`(() => {
+      const img = document.querySelector('#panel .panel-avatar img');
+      return img ? img.getAttribute('src') : '';
+    })()`);
+    ok(String(panelAvatar).startsWith('data:image/png;base64,'),
+      '面板主头像渲染为 dataURL');
+
+    const photoCells = await jsT(`document.querySelectorAll('#panel .photos .photo.has').length`);
+    ok(photoCells === 2, `面板显示 2 张照片（实得 ${photoCells}）`);
+    const addBtn = await jsT(`!!document.querySelector('#panel .photos .photo.add')`);
+    ok(addBtn, '有本地文件桥 → 渲染「＋」添加入口');
+
+    /* ---- 灯箱：点缩略图 → **单张大图**（原图 dataURL，字节级一致） ----
+       ⚠️ 别写成「点缩略图开网格」：网格全览是从面板的「+N」进的
+          （规格：点击缩略图查看原图）。这坑踩过一次。 */
+    step('点缩略图开灯箱（单张大图）');
+    await jsT(`document.querySelector('#panel .photos .photo.has').click()`);
+    await tick(700);
+    ok(await jsT(`!!document.querySelector('.modal-photo')`), '点缩略图打开灯箱');
+    const fullSrc = await jsT(`(() => {
+      const img = document.querySelector('.modal-photo .photo-full');
+      return img ? img.getAttribute('src') : '';
+    })()`);
+    ok(fullSrc === `data:image/png;base64,${PNG_A.toString('base64')}`,
+      '单张大图是原图 dataURL（字节级一致）');
+    ok(await jsT(`!!document.querySelector('.modal-photo [data-ph="prev"]')`), '单张视图有「上一张」');
+    ok(await jsT(`!!document.querySelector('.modal-photo [data-ph="next"]')`), '单张视图有「下一张」');
+
+    step('「下一张」翻到第二张');
+    await jsT(`document.querySelector('.modal-photo [data-ph="next"]').click()`);
+    await tick(700);
+    const fullSrc2 = await jsT(`(() => {
+      const img = document.querySelector('.modal-photo .photo-full');
+      return img ? img.getAttribute('src') : '';
+    })()`);
+    ok(fullSrc2 === `data:image/png;base64,${PNG_B.toString('base64')}`,
+      '「下一张」换成了第二张（字节级一致）');
+    ok(await jsT(`document.querySelector('.modal-photo .modal-sub').textContent.includes('2 / 2')`),
+      '标题标着「2 / 2」');
+
+    /* ---- 设为主头像：当前这张（第二张）→ 面板头像跟着变 ---- */
+    step('设为主头像');
+    await jsT(`document.querySelector('.modal-photo [data-ph="avatar"]').click()`);
+    await tick(800);
+    const avatarAfter = await jsT(`(() => {
+      const img = document.querySelector('#panel .panel-avatar img');
+      return img ? img.getAttribute('src') : '';
+    })()`);
+    ok(String(avatarAfter).startsWith('data:image/png;base64,') && avatarAfter !== panelAvatar,
+      '设为主头像后面板头像换成新照片');
+    await jsT(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await tick(300);
+    ok(await jsT(`!document.querySelector('.modal-photo')`), 'Esc 关闭灯箱');
+
+    /* ---- 删除：走确认框 → 文件真删 → 引用摘除 → 主头像一并清空 ---- */
+    step('删除一张照片');
+    await jsT(`document.querySelector('#panel .photos .photo.has [data-act="photo-delete"][data-name="pme-def456.png"]').click()`);
+    await tick(300);
+    ok(await jsT(`!!document.querySelector('.confirm-layer')`), '删除前弹确认框');
+    await jsT(`document.querySelector('.confirm-layer [data-cf="1"]').click()`);
+    await tick(900);
+    ok(!fs.existsSync(path.join(photoBook.photosDir, 'pme-def456.png')),
+      '磁盘文件已删（主进程真删，不是只摘引用）');
+    ok(!fs.existsSync(path.join(photoBook.photosDir, 'pme-def456.thumb.png')),
+      '缩略图一并删掉');
+    const cellsAfterDelete = await jsT(`document.querySelectorAll('#panel .photos .photo.has').length`);
+    ok(cellsAfterDelete === 1, `面板剩 1 张照片（实得 ${cellsAfterDelete}）`);
+    ok(await jsT(`!document.querySelector('#panel .panel-avatar img')`),
+      '删掉的正是主头像 → 头像回落首字占位（一致性）');
+
+    /* ---- 缺失降级：库里有引用、磁盘没文件 → 空槽，不破图 ---- */
+    step('缺失降级');
+    await jsT(`document.querySelector('#canvas .node[data-id="p_f"]').click()`);
+    await tick(500);
+    ok(await jsT(`document.querySelectorAll('#panel .photos .photo.has').length`) === 0,
+      '引用缺失文件的成员：照片区没有图');
+    ok(await jsT(`document.querySelectorAll('#panel .photos img').length`) === 0,
+      '缺失照片不渲染 <img>（不会出现破图）');
+    const emptyCells = await jsT(`document.querySelectorAll('#panel .photos .photo.empty').length`);
+    ok(emptyCells >= 3, `缺失 + 空槽补齐网格（${emptyCells} 格）`);
+
+    /* ---- +N：5 张照片 → 3 槽 + 「+2」角标 → 全览 ---- */
+    step('「+N」全览');
+    await jsT(`document.querySelector('#canvas .node[data-id="p_bro"]').click()`);
+    await tick(500);
+    const moreText = await jsT(`(document.querySelector('#panel .photos .photo.more')||{}).textContent || ''`);
+    ok(moreText === '+2', `超出 3 张显示「+2」角标（实得「${moreText}」）`);
+    await jsT(`document.querySelector('#panel .photos .photo.more').click()`);
+    await tick(400);
+    ok(await jsT(`document.querySelectorAll('.modal-photo .photo-cell').length`) === 5,
+      '「+N」打开全览，5 张都在');
+    await jsT(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await tick(300);
+
+    /* ---- restore / readMany 两个 IPC ---- */
+    step('restore / readMany 两个 IPC');
+    const rNew = await jsT(`window.genogramFS.photos.restore({ 'pme-new777.png': 'data:image/png;base64,${PNG_B.toString('base64')}' })`);
+    ok(rNew?.ok === true && rNew.written?.includes('pme-new777.png'),
+      `photos.restore IPC 落盘（written=${JSON.stringify(rNew?.written)}）`);
+    ok(fs.existsSync(path.join(photoBook.photosDir, 'pme-new777.png')), 'restore 的文件真在磁盘上');
+    const rMany = await jsT(`window.genogramFS.photos.readMany(['pme-abc123.png', 'pme-zzz999.png'])`);
+    ok(rMany?.ok === true && Object.keys(rMany.map).length === 1 && rMany.missing?.includes('pme-zzz999.png'),
+      `readMany 存在的进 map、缺失进 missing（missing=${JSON.stringify(rMany?.missing)}）`);
+
+    /* ---- 导出回归：带头像照片的谱，html2canvas 拍完 toDataURL 不抛 ---- */
+    /* ★ 这就是 app.js 导出图片处坑位注释钉的那件事：
+       照片若以 file:// 上画布 → 画布被污染 → toDataURL 抛 SecurityError。
+       现在的通道是 dataURL，这根弦断了这里立刻红。 */
+    step('带头像导出 PNG（toDataURL 不抛 SecurityError）');
+    await jsT(`document.querySelector('#canvas .node[data-id="p_me"]').click()`);
+    await tick(400);
+    await jsT(`document.querySelector('#panel .photos .photo.has [data-act="photo-avatar"]').click()`);
+    await tick(800);
+    ok(await jsT(`!!document.querySelector('#panel .panel-avatar img')`), '导出前给 p_me 戴回头像');
+    const exportShot = await jsT(`(async () => {
+      try {
+        const src = document.getElementById('canvas');
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const n of src.querySelectorAll('.node')) {
+          const x = parseFloat(n.style.left) || 0, y = parseFloat(n.style.top) || 0;
+          minX = Math.min(minX, x); minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x + n.offsetWidth); maxY = Math.max(maxY, y + n.offsetHeight);
+        }
+        const PAD = 32;
+        const W = Math.ceil(maxX - minX) + PAD * 2;
+        const H = Math.ceil(maxY - minY) + PAD * 2;
+        const root = document.createElement('div');
+        root.style.cssText = 'position:fixed;left:0;top:0;z-index:-99999;background:#fff;'
+          + 'width:' + W + 'px;height:' + H + 'px;';
+        const clone = src.cloneNode(true);
+        clone.removeAttribute('id');
+        clone.querySelectorAll('[id]').forEach((e) => e.removeAttribute('id'));
+        clone.querySelectorAll('[tabindex]').forEach((e) => e.removeAttribute('tabindex'));
+        clone.querySelectorAll('.anchor-flag, .tag-expand, .tag-todo').forEach((e) => e.remove());
+        root.appendChild(clone);
+        document.body.appendChild(root);
+        const cv = await html2canvas(root, {
+          scale: 2, backgroundColor: '#ffffff', width: W, height: H, logging: false, useCORS: true,
+        });
+        const url = cv.toDataURL('image/png');
+        root.remove();
+        return url.slice(0, 22);
+      } catch (e) {
+        return 'THREW:' + (e && e.message || e);
+      }
+    })()`);
+    ok(exportShot === 'data:image/png;base64,',
+      `带头像照片导出 PNG，toDataURL 未抛 SecurityError（实得：${String(exportShot).slice(0, 40)}）`);
 
     head('11. 主进程启动日志（分步留痕）');
     const steps = fs.existsSync(BOOT_LOG)
@@ -710,6 +1022,9 @@ async function runSmoke() {
     fails++;
     L.push('EXCEPTION: ' + (e && e.stack || e));
     console.error('\x1b[31mEXCEPTION\x1b[0m', e);
+    /* 堆栈也打到 stdout：终端里能直接看到「卡/错在哪一行」，
+       不用再去翻 stderr（那里的输出容易被重定向吞掉）。 */
+    console.log('\x1b[31m' + String(e?.stack || e) + '\x1b[0m');
     dumpBootLog();
   }
 
@@ -728,12 +1043,20 @@ async function runSmoke() {
   app.exit(code);
 }
 
-/* ---------- 4. 在模块顶层只挂一个 .then()，绝不 await ---------- */
+/* ---------- 4. 在模块顶层只挂一个异步 IIFE，绝不 await ---------- */
+/* 顺序：先预置照片谱（动沙箱文件）→ 再拉起主进程 → 再跑冒烟。
+   仍是「模块顶层不等候」，ready 事件不会被自己锁死（见文件头警告）。 */
 
-import('../electron/main.js')
-  .then(runSmoke)
-  .catch((err) => {
+let photoBook = null;
+
+(async () => {
+  try {
+    photoBook = await seedPhotoBook();
+    await import('../electron/main.js');
+    await runSmoke();
+  } catch (err) {
     console.error('\x1b[31m主进程 import 失败\x1b[0m', err);
     dumpBootLog();
     app.exit(1);
-  });
+  }
+})();

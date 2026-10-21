@@ -25,11 +25,15 @@ import {
   resolveDataDir, dataDirCandidates, ensureLayout, backupOnOpen, photosDir, bookDir, booksRoot,
 } from './paths.js';
 import {
+  addPhotos, readDataUrl, readMany, removePhotos, restoreMap, squareThumb,
+} from './photoStore.js';
+import { isValidPhotoName } from '../src/core/photoNames.js';
+import {
   ensureLibrary, createBook, renameBook, deleteBook, setCurrent,
   readLibrary, currentBook, setPeopleCount,
 } from './library.js';
 
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = electron;
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeImage } = electron;
 
 /* 兜底：如果 ELECTRON_RUN_AS_NODE 没被清掉，Electron 会退化成纯 Node，
    此时 `electron` 拿到的是「二进制路径字符串」，app 是 undefined。
@@ -218,7 +222,11 @@ if (DEBUG) {
 }
 
 // 单实例：族谱是单机应用，开两个窗口写同一个库没有意义
-if (!app.requestSingleInstanceLock()) {
+/* ⚠️ 自动化测试要能跟真应用**并存**：冒烟跑的是独立沙箱目录（GENOGRAM_DATA_DIR），
+   跟用户真库毫无关系，却被单实例锁挡在门外 —— 应用开着的时候冒烟只能秒退，
+   看起来像「什么都没发生」。所以给测试一个开关：跳过单实例锁。 */
+const NO_SINGLE_INSTANCE = !!process.env.GENOGRAM_NO_SINGLE_INSTANCE;
+if (!NO_SINGLE_INSTANCE && !app.requestSingleInstanceLock()) {
   /* ⚠️ 这里以前只有一行 console.error，然后 app.quit() ——
      Windows 上 GUI 程序没有控制台，用户什么都看不见：
      「双击没反应、也没有任何提示」就是这么来的（真出现过一次）。
@@ -724,6 +732,76 @@ function registerIpc() {
     return err ? { ok: false, error: err } : { ok: true, path: dir };
   });
 
+  /* ---------------- 照片（F12） ----------------
+     一律走**当前这本谱**的 photos/ 目录。删除 / 读取的路径安全性
+     由 photoStore 的 assertInside 把守（挡 `..\` 逃逸与脏数据）。 */
+
+  /** 当前谱的 photos 目录；没开谱时 null */
+  const photoDir = () => {
+    if (!currentId) return null;
+    const dir = photosDir(bookDir(dataDir, currentId));
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  /** 添加：系统多选对话框 → 复制 + 校验 + 缩略图（photoStore.addPhotos） */
+  ipcMain.handle('photo:add', async (_e, { personId } = {}) => {
+    const dir = photoDir();
+    if (!dir) return { ok: false, error: '谱还没有打开' };
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: '选择照片（可多选）',
+      defaultPath: dir,
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '图片', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'] }],
+    });
+    if (canceled || !filePaths?.length) return { ok: false, canceled: true };
+    return addPhotos(dir, personId, filePaths, nativeImage);
+  });
+
+  /** 读方形缩略图（头像 / 网格格都用它）。
+   *  旧版缩略图是「等比缩放」不是「方形裁切」→ 读的时候就地重生成（见 photoStore.squareThumb）。 */
+  ipcMain.handle('photo:thumb', (_e, { name }) => {
+    const dir = photoDir();
+    return dir ? squareThumb(dir, name, nativeImage) : { ok: false, error: '谱还没有打开' };
+  });
+
+  /** 读原图 */
+  ipcMain.handle('photo:original', (_e, { name }) => {
+    const dir = photoDir();
+    return dir ? readDataUrl(dir, name, false) : { ok: false, error: '谱还没有打开' };
+  });
+
+  /** 删（连缩略图；EPERM 进 errors，调用方保留数据库引用） */
+  ipcMain.handle('photo:remove', (_e, { names }) => {
+    const dir = photoDir();
+    return dir ? removePhotos(dir, names) : { ok: false, error: '谱还没有打开' };
+  });
+
+  /** 批量读（导出「包含照片」用；缺失进 missing） */
+  ipcMain.handle('photo:readMany', (_e, { names }) => {
+    const dir = photoDir();
+    return dir ? readMany(dir, names) : { ok: false, error: '谱还没有打开' };
+  });
+
+  /** 批量查存在性（导入后报「缺失数」用；不读文件内容，只 stat） */
+  ipcMain.handle('photo:exists', (_e, { names }) => {
+    const dir = photoDir();
+    if (!dir) return { ok: false, error: '谱还没有打开' };
+    const existing = [];
+    for (const n of names || []) {
+      try {
+        if (isValidPhotoName(n) && fs.existsSync(path.join(dir, n))) existing.push(n);
+      } catch { /* 单个名字有问题不影响其他 */ }
+    }
+    return { ok: true, existing };
+  });
+
+  /** 恢复内联照片（导入用；已存在跳过，不覆盖） */
+  ipcMain.handle('photo:restore', (_e, { map }) => {
+    const dir = photoDir();
+    return dir ? restoreMap(dir, map) : { ok: false, error: '谱还没有打开' };
+  });
+
   /* 弹窗打开 / 关闭 → 禁用 / 恢复那些会捣乱的原生菜单项。
      accelerator 拦在原生层，渲染层的 keydown 守卫管不到它们，只能主进程出手。 */
   ipcMain.on('ui:editing', (_e, on) => setEditingMode(!!on));
@@ -749,6 +827,7 @@ function registerIpc() {
 const EDITING_BLOCKED = [
   'mi-add', 'mi-import', 'mi-export', 'mi-export-image', 'mi-clear',
   'mi-view-tree', 'mi-view-check', 'mi-fit', 'mi-to-me', 'mi-devtools', 'mi-zoom-in', 'mi-zoom-out', 'mi-zoom-reset',
+  'mi-reload',
   // v0.2.24：多谱切换同样会在弹窗编辑时把上层内容整个换掉
   'mi-book-new', 'mi-book-rename', 'mi-book-delete',
 ];
@@ -811,6 +890,12 @@ function buildMenu() {
         { id: 'mi-zoom-reset', label: '重置缩放', role: 'resetZoom' },
         { type: 'separator' },
         { label: '全屏', role: 'togglefullscreen' },
+        /* 重新加载（Ctrl+R）。为什么必须有这一项：Electron 里 Ctrl+R/F5 这类
+           浏览器快捷键是靠菜单的 accelerator 表分发的 —— 自定义菜单不登记
+           reload，这个组合键就是空的（F12 好使是因为上面明确写了）。
+           开发期改完渲染层代码，不用重启进程，Ctrl+R 就能拿到新代码。
+           编辑弹窗打开时同样禁用（见 EDITING_BLOCKED）：半截表单被刷掉最恼人。 */
+        { id: 'mi-reload', label: '重新加载', accelerator: 'CmdOrCtrl+R', role: 'reload' },
         { id: 'mi-devtools', label: '开发者工具', accelerator: 'F12', role: 'toggleDevTools' },
       ],
     },

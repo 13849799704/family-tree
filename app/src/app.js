@@ -33,6 +33,10 @@ import {
   storageMode, storageInfo, openDataDir,
   listBooks, currentBook, createBook, switchBook, renameBook, deleteBook,
 } from './store.js';
+import {
+  ensure, ensureForDataset, forget, invalidate as invalidatePhotos, cached, photoBridge,
+} from './core/photos.js';
+import { collectPhotoRefs } from './core/photoNames.js';
 import { TreeCanvas } from './ui/tree.js';
 import { renderPanel } from './ui/panel.js';
 import { renderCheck } from './ui/check.js';
@@ -165,6 +169,7 @@ function boot() {
 
   recompute();
   render();
+  warmPhotos();   // 带头像 / 照片的成员：异步取图，到了再重绘
 
   /* 初始视角。
      开发便利：URL 带 ?zoom=2 可直接放大到 200%，?focus=p_me 把某人居中。
@@ -597,6 +602,7 @@ function selectPerson(id) {
   state.panelCollapsed = false;
   canvas.setActive(id);
   renderPanelArea();
+  warmPhotos();   // 新选中的人可能有没预热过的照片
 }
 
 /* ========================================================= */
@@ -830,6 +836,247 @@ function deletePerson(id) {
 }
 
 /* ========================================================= */
+/* 照片（F12）                                                  */
+/* ---------------------------------------------------------
+ * 三层分工：core/photos.js 管缓存与 IPC；本文件管交互与数据流；
+ * electron/photoStore.js（主进程）管磁盘。行为契约见
+ * openspec/specs/photo-management。
+ * ========================================================= */
+
+let warming = false;
+
+/**
+ * 预热照片（全谱头像 + 面板照片），有新解析出来的就重绘一次。
+ *
+ * 渲染是同步的、取图是异步的 —— 这之间界面先显示占位（首字 / 空槽），
+ * 图到了再重绘。幂等 + 重入保护：缓存里都有时一次 IPC 都不发。
+ */
+async function warmPhotos() {
+  if (!photoBridge() || warming || !state.dataset) return;
+  warming = true;
+  try {
+    for (let round = 0; round < 3; round++) {
+      const fresh = await ensureForDataset(state.dataset);
+      if (!fresh) break;   // 没有新解析出来的 → 不用重绘
+      render();
+    }
+  } finally {
+    warming = false;
+  }
+}
+
+/** 添加照片：面板「＋」→ 系统对话框 → 主进程收文件 → 追加 photos 数组 */
+async function addPhoto(personId) {
+  const b = photoBridge();
+  if (!b) return;   // 无桥时面板根本不渲染这个按钮，双保险
+  const res = await b.add(personId);
+  if (!res?.ok) {
+    if (!res?.canceled) toast(res?.error || '添加照片失败', 'warn', 6000);
+    return;
+  }
+  if (res.added?.length) {
+    const people = state.dataset.people.map((x) => (
+      x.id === personId ? { ...x, photos: [...(x.photos || []), ...res.added] } : x
+    ));
+    state.dataset = normalizeDataset({ ...state.dataset, people });
+    forget(res.added);   // 摘掉可能存在的负缓存，让新文件能被看见
+    commit(null);
+    toast(`已添加 ${res.added.length} 张照片`, 'ok');
+  }
+  if (res.rejected?.length) {
+    const detail = res.rejected
+      .map((r) => `${String(r.file).split(/[\\/]/).pop()}（${r.reason}）`)
+      .join('；');
+    toast(`有 ${res.rejected.length} 个文件没能添加：${detail}`, 'warn', 7000);
+  }
+  warmPhotos();
+}
+
+/** 把一张照片设为该成员的主头像（谱树与面板即时生效） */
+async function setPhotoAvatar(personId, name) {
+  const p = state.index.byId.get(personId);
+  if (!p || !name) return;
+  if (p.avatar === name) {
+    toast('这张已经是主头像了', 'ok', 1800);
+    return;
+  }
+  const people = state.dataset.people.map((x) => (
+    x.id === personId ? { ...x, avatar: name } : x
+  ));
+  state.dataset = normalizeDataset({ ...state.dataset, people });
+  forget([name]);
+  await commit(null);
+  warmPhotos();
+  toast('已设为主头像', 'ok');
+}
+
+/**
+ * 删一张照片：确认 → 主进程删文件 → 摘引用（被删的正是主头像则一并清空）。
+ * ⚠️ 文件删不掉时（EPERM，多半被资源管理器 / 预览占着）**保留数据库引用**，
+ *    让用户关掉占用后重试 —— 不制造「库说删了、文件还在」的漂移。
+ */
+async function deletePhoto(personId, name) {
+  const p = state.index.byId.get(personId);
+  if (!p || !name) return;
+  const ok = await confirmOverlay({
+    title: '删除照片',
+    message: '删除后不可恢复 —— 文件会从这台电脑的照片目录里移除。\n\n'
+      + `确定要删除「${displayName(p)}」的这张照片吗？`,
+    confirmText: '删除',
+    danger: true,
+  });
+  if (!ok) return;
+  const b = photoBridge();
+  if (!b) return;
+  const res = await b.remove([name]);
+  if (!res?.ok) {
+    toast(res?.error || '删除失败', 'warn', 6000);
+    return;
+  }
+  if (res.errors?.length) {
+    toast(`没能删除：${res.errors[0].error}。请先关掉正在查看这个文件的窗口，再试一次`, 'warn', 7000);
+    return;
+  }
+  const people = state.dataset.people.map((x) => (
+    x.id === personId
+      ? {
+          ...x,
+          photos: (x.photos || []).filter((n) => n !== name),
+          avatar: x.avatar === name ? '' : x.avatar,
+        }
+      : x
+  ));
+  state.dataset = normalizeDataset({ ...state.dataset, people });
+  forget([name]);
+  await commit(null);
+  warmPhotos();
+  toast('照片已删除', 'ok');
+}
+
+/**
+ * 照片灯箱：缩略图 / 「+N」都开到这。网格全览 → 点开单张大图（原图 dataURL）。
+ * 单张视图：←→ 翻页、Esc 关闭、「设为主头像」「删除」。
+ *
+ * ⚠️ close() 必须**立即**清空 innerHTML（不能像别的弹窗等 220ms 过渡）：
+ *    「删除」要走 confirmOverlay，它靠「overlay 里还有没有别人」决定何时摘
+ *    遮罩类 .on（见 dialog.js confirmOverlay 的注释）。留着旧内容会让它
+ *    误判「还有人」，灯箱关了遮罩却还在，界面就点不动了。
+ */
+async function openPhotoLightbox(personId, startName = '') {
+  const p = state.index.byId.get(personId);
+  const b = photoBridge();
+  if (!p || !b) return;
+  const photos = (p.photos || []).filter(Boolean);
+  if (!photos.length) return;
+
+  /* 和每个弹窗一样：先取消上一个弹窗排的 220ms 清空定时器，
+     否则它会在我们渲染之后把灯箱内容抹掉（表现为「闪一下就没有」）。 */
+  clearTimeout(overlay._clearTimer);
+  overlay._clearTimer = null;
+  overlay.onclick = null;
+
+  let idx = startName ? photos.indexOf(startName) : -1;   // -1 = 网格态
+  await ensure(photos);   // 网格要先有缩略图
+
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    overlay.onclick = null;
+    overlay.classList.remove('on');
+    clearTimeout(overlay._clearTimer);
+    overlay._clearTimer = null;
+    overlay.innerHTML = '';
+  };
+
+  function onKey(e) {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (idx >= 0 && e.key === 'ArrowLeft') {
+      e.preventDefault(); e.stopPropagation(); show(Math.max(0, idx - 1));
+    } else if (idx >= 0 && e.key === 'ArrowRight') {
+      e.preventDefault(); e.stopPropagation(); show(Math.min(photos.length - 1, idx + 1));
+    }
+  }
+  document.addEventListener('keydown', onKey);
+
+  const headHtml = (sub) => `
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">${esc(displayName(p))} 的照片</div>
+        <div class="modal-sub">${sub}</div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-icon" data-ph="close" aria-label="关闭">${ICON.x}</button>
+    </div>`;
+
+  const bind = () => {
+    overlay.querySelectorAll('[data-ph]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const act = el.dataset.ph;
+        if (act === 'close') return close();
+        if (act === 'open') return show(Number(el.dataset.i));
+        if (act === 'prev') return show(Math.max(0, idx - 1));
+        if (act === 'next') return show(Math.min(photos.length - 1, idx + 1));
+        if (act === 'avatar') return setPhotoAvatar(p.id, photos[idx]);
+        if (act === 'delete') {
+          const name = photos[idx];
+          close();
+          return deletePhoto(p.id, name);
+        }
+      });
+    });
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  };
+
+  const showGrid = () => {
+    idx = -1;
+    overlay.innerHTML = `
+      <div class="modal modal-photo" role="dialog" aria-modal="true" aria-label="照片">
+        ${headHtml(`共 ${photos.length} 张 · 点开看大图`)}
+        <div class="modal-body photo-grid">
+          ${photos.map((n, i) => {
+            const src = cached(n);
+            return src
+              ? `<button type="button" class="photo-cell" data-ph="open" data-i="${i}" title="第 ${i + 1} 张"><img src="${esc(src)}" alt=""></button>`
+              : `<div class="photo-cell photo-cell-missing" title="文件缺失">缺失</div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    bind();
+    overlay.classList.add('on');   // ⚠️ 没这一行遮罩不显示，灯箱等于没打开
+  };
+
+  const show = async (i) => {
+    idx = i;
+    const name = photos[i];
+    overlay.innerHTML = `
+      <div class="modal modal-photo" role="dialog" aria-modal="true" aria-label="照片">
+        ${headHtml(`第 ${i + 1} / ${photos.length} 张`)}
+        <div class="modal-body photo-stage" data-ph="stage"><span class="muted">正在读取…</span></div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-ghost" data-ph="prev" ${i === 0 ? 'disabled' : ''}>${ICON.chevronLeft} 上一张</button>
+          <span class="photo-foot-spacer"></span>
+          <button type="button" class="btn" data-ph="avatar">${ICON.avatar} 设为主头像</button>
+          <button type="button" class="btn btn-danger" data-ph="delete">${ICON.trash} 删除</button>
+          <span class="photo-foot-spacer"></span>
+          <button type="button" class="btn btn-ghost" data-ph="next" ${i === photos.length - 1 ? 'disabled' : ''}>下一张 ${ICON.chevronRight}</button>
+        </div>
+      </div>`;
+    bind();
+    overlay.classList.add('on');   // 单张视图同样要摘掉遮罩的隐藏（见 showGrid 的警告）
+    const r = await b.original(name);
+    // 异步回来时用户可能已切走 / 关掉：只有还停在这一张才填图
+    const stage = overlay.querySelector('[data-ph="stage"]');
+    if (stage && idx === i) {
+      stage.innerHTML = r?.ok
+        ? `<img class="photo-full" src="${esc(r.dataUrl)}" alt="">`
+        : `<span class="muted">照片文件不存在（${esc(r?.error || '缺失')}）</span>`;
+    }
+  };
+
+  if (idx >= 0) show(idx);
+  else showGrid();
+}
+
+/* ========================================================= */
 /* 导入 / 导出                                                 */
 /* ========================================================= */
 
@@ -841,7 +1088,7 @@ async function doImport() {
       if (!res.canceled) toast(res.error, 'warn', 6000);
       return;
     }
-    return offerImport(res.dataset, res.name);
+    return offerImport(res.dataset, res.name, res.photos);
   }
 
   // 网页版：退回 <input type=file>
@@ -853,7 +1100,7 @@ async function doImport() {
     if (!file) return;
     const res = await importFile(file);
     if (!res.ok) return toast(res.error, 'warn', 6000);
-    offerImport(res.dataset, file.name);
+    offerImport(res.dataset, file.name, res.photos);
   };
   input.click();
 }
@@ -868,14 +1115,17 @@ async function doImport() {
  *   原始诉求正是「想再建一套」。所以主路径改成新建，
  *   「覆盖当前谱」降为第三个按钮（保留，因为「恢复备份」场景确实需要）。
  */
-async function offerImport(dataset, name) {
+async function offerImport(dataset, name, photos = null) {
   const base = String(name || '').replace(/\.json$/i, '').trim();
+  const photoCount = photos ? Object.keys(photos).length : 0;
 
   const choice = await confirmOverlay({
     title: '导入这份数据',
     message: `「${name}」\n\n`
       + `· 成员 ${dataset.people.length} 人\n`
-      + `· 关系 ${dataset.relationships.length} 条\n\n`
+      + `· 关系 ${dataset.relationships.length} 条\n`
+      + (photoCount ? `· 内联照片 ${photoCount} 张\n` : '')
+      + '\n'
       + '默认把它建成一本新谱（当前这本不受影响），适合收集来的底稿；\n'
       + '要把这份数据覆盖到当前谱上（如恢复备份），点左下角那个按钮。',
     confirmText: '建成新谱',
@@ -884,26 +1134,32 @@ async function offerImport(dataset, name) {
   });
   if (!choice) return;
 
-  if (choice === 'alt') return applyImport(dataset, name);
+  if (choice === 'alt') return applyImport(dataset, name, photos);
 
   const r = await createBook({ name: base || undefined, seedDataset: dataset });
   if (!r.ok) { toast(r.error || '新建失败', 'warn', 6000); return; }
 
+  /* 照片落盘必须赶在 applyBookSwap（渲染 + warmPhotos）**之前**：
+     反过来先渲染，warmPhotos 会把「文件还不在」记成负缓存，
+     照片恢复了也被挡着不显示（除非再 invalidate 一次）。 */
+  const restored = await restoreImportedPhotos(photos, r.dataset || dataset);
   applyBookSwap(r.dataset, r.book, r.library?.books);
-  toast(`已用「${name}」新建「${r.book?.name || ''}」`, 'ok', 4200);
+  toast(`已用「${name}」新建「${r.book?.name || ''}」${restored}`, 'ok', 4200);
 }
 
 /**
  * 覆盖式导入（原来的行为）。留着是为了「恢复备份」这条路径 ——
  * 那时用户要的就是盖回去，而不是再多一本同名的谱。
  */
-async function applyImport(dataset, name) {
+async function applyImport(dataset, name, photos = null) {
   // 自绘确认框，**不能用原生 confirm**（见 deletePerson 的注释）
   const ok = await confirmOverlay({
     title: '导入会覆盖当前谱',
     message: `即将把「${name}」导入到当前谱「${state.book?.name || ''}」\n\n`
       + `· 成员 ${dataset.people.length} 人\n`
-      + `· 关系 ${dataset.relationships.length} 条\n\n`
+      + `· 关系 ${dataset.relationships.length} 条\n`
+      + (photos && Object.keys(photos).length ? `· 内联照片 ${Object.keys(photos).length} 张\n` : '')
+      + '\n'
       + '当前谱的现有数据会被完全替换，此操作不可撤销。\n'
       + '（只是想看看这份底稿的话，建议选「建成新谱」）',
     confirmText: '覆盖导入',
@@ -911,13 +1167,51 @@ async function applyImport(dataset, name) {
   });
   if (!ok) return;
 
+  /* 先落盘照片，再切数据（理由同 offerImport 的新谱分支） */
+  const restored = await restoreImportedPhotos(photos, dataset);
+
   state.dataset = dataset;
   state.viewpoint = state.dataset.viewpoint || state.dataset.people[0]?.id || '';
   state.activeId = state.viewpoint;
   state.familyKey = 'main';
   state.openKey = null;
-  commit('导入成功');
+  commit('导入成功' + restored);
   setTimeout(() => canvas.fit(), 60);
+}
+
+/**
+ * 把导入文件里内联的照片落盘到**当前谱**（调用方保证目的地谱已就位），
+ * 回报一句拼进 toast 的话。没有内联照片 / 没有桥 → 空串（什么都不说）。
+ *
+ * 缺失数怎么算：内联带来的（written + skipped）一定在磁盘上；
+ * 其余被引用的名字现查一遍存在性 —— 「只存文件名」的旧导出再导入时，
+ * 这句话就是用户知道「照片没跟来」的唯一地方（spec：导入结果报缺失数）。
+ *
+ * @param {Object<string,string>|null} photos {文件名: dataUrl}
+ * @param {object} dataset 导入后的数据集（用来收集引用）
+ * @returns {Promise<string>} 形如「 · 已恢复 3 张照片，另有 2 个照片文件缺失」
+ */
+async function restoreImportedPhotos(photos, dataset) {
+  if (!photos) return '';
+  const names = Object.keys(photos);
+  if (!names.length) return '';
+  const b = photoBridge();
+  if (!b) return ' · 照片未恢复（当前环境写不了本地文件）';
+
+  const r = await b.restore(photos);
+  if (!r?.ok) return ' · 照片恢复失败：' + (r?.error || '未知错误');
+
+  const brought = new Set([...(r.written || []), ...(r.skipped || [])]);
+  const others = collectPhotoRefs(dataset).filter((n) => !brought.has(n));
+  let missing = r.errors?.length || 0;
+  if (others.length) {
+    const ex = await b.exists(others);
+    if (ex?.ok) missing += others.length - (ex.existing?.length || 0);
+  }
+
+  let note = ` · 已恢复 ${r.written?.length || 0} 张照片`;
+  if (missing > 0) note += `，另有 ${missing} 个照片文件缺失（旧文件没跟着来）`;
+  return note;
 }
 
 async function doExport() {
@@ -936,22 +1230,50 @@ async function doExport() {
     omitted: Object.keys(state.layouts)
       .filter((k) => k !== state.familyKey)
       .map((k) => state.layouts[k].tree.label),
+    /* 谱里有照片引用才问「要不要带照片」—— 一张都没有时别让用户白选 */
+    hasPhotos: collectPhotoRefs(state.dataset).length > 0,
   });
   if (!pick) return;
 
   /* ⚠️ ⚠️ state.dataset 是内存里的真身，下一次 commit 会把它整个写回库。
      裁剪只能是它的**副本**，绝不能就地改 —— 否则「只导一份」
      就变成了「把库也裁了」，那才是不可逆的数据损失。 */
-  const dataset = pick === 'tree' ? scopeToTree(state.dataset, tree) : state.dataset;
+  const dataset = pick.scope === 'tree' ? scopeToTree(state.dataset, tree) : state.dataset;
 
-  const res = await exportFile(dataset, pick === 'tree' ? scopeFilename(tree?.label) : undefined);
+  /* 「包含照片」：从**这份副本**收集引用 → 主进程批量读 dataUrl → 内联进 JSON。
+     引用收集按副本走，所以「只导当前家族 + 包含照片」只会带上这一页的人的照片。 */
+  let photoMap = null;
+  if (pick.photos) {
+    const names = collectPhotoRefs(dataset);
+    const b = photoBridge();
+    if (!b) {
+      toast('当前环境读不到照片文件，将只导出文件名', 'warn', 5000);
+    } else if (names.length) {
+      const r = await b.readMany(names);
+      if (r?.ok) {
+        photoMap = r.map;
+        if (r.missing?.length) {
+          toast(`有 ${r.missing.length} 张照片文件缺失，没有包含进导出文件`, 'warn', 5000);
+        }
+      } else {
+        toast(r?.error || '读取照片失败，将只导出文件名', 'warn', 5000);
+      }
+    }
+  }
+
+  const res = await exportFile(
+    dataset,
+    pick.scope === 'tree' ? scopeFilename(tree?.label) : undefined,
+    photoMap
+  );
   if (!res.ok) {
     if (!res.canceled) toast(res.error || '导出失败', 'warn', 6000);
     return;
   }
-  toast(pick === 'tree'
-    ? `已导出「${res.name}」（${dataset.people.length} 人，不含其他家族）`
-    : `已导出「${res.name}」`, 'ok', pick === 'tree' ? 4000 : 2600);
+  const photoNote = photoMap ? ` · 含 ${Object.keys(photoMap).length} 张照片` : '';
+  toast(pick.scope === 'tree'
+    ? `已导出「${res.name}」（${dataset.people.length} 人，不含其他家族${photoNote}）`
+    : `已导出「${res.name}」${photoNote}`, 'ok', pick.scope === 'tree' ? 4000 : 2600);
 }
 
 /** 本树内部的关系条数（用于导出弹窗里的数字，跟裁剪结果口径一致） */
@@ -1236,10 +1558,15 @@ function applyBookSwap(dataset, book, books) {
   state.openKey = null;
   state.firstRun = false;   // 切谱 ≠ 首次运行，别再灌示例
 
+  /* 照片缓存是**按谱**的：不同谱的 photos/ 目录不同，文件名可能撞。
+     所以换谱先全清，再按新谱重新预热。 */
+  invalidatePhotos();
+
   recompute();
   render();
   renderBookChip();
   setTimeout(() => canvas.fit(), 60);
+  warmPhotos();
 }
 
 /** 刷新顶栏那颗「当前谱」按钮 */
@@ -1968,7 +2295,11 @@ function runAction(act, b = null) {
     }
     case 'add-relative': addRelative(b?.dataset.id, b?.dataset.rel || null); break;
     case 'switch-vp': switchViewpoint(b?.dataset.id); break;
-    case 'add-photo': toast('照片功能待接入（数据字段已预留 photos / avatar）', 'warn', 2600); break;
+    case 'add-photo': addPhoto(b?.dataset.id); break;
+    case 'photo-open': openPhotoLightbox(b?.dataset.id, b?.dataset.name); break;
+    case 'photos-all': openPhotoLightbox(b?.dataset.id); break;
+    case 'photo-avatar': setPhotoAvatar(b?.dataset.id, b?.dataset.name); break;
+    case 'photo-delete': deletePhoto(b?.dataset.id, b?.dataset.name); break;
     default: break;
   }
 }

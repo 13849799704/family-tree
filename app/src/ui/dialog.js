@@ -861,21 +861,28 @@ export function newBookDialog({
    ========================================================= */
 
 /**
- * 问「导全谱」还是「只导当前家族」。
+ * 导出范围弹窗（全谱 / 当前家族二选一）。
+ *
+ * v0.2.85：多问一件事 —— **要不要把照片一起带走**。勾上时渲染层会把
+ * photos/ 里的文件读出来，以 base64 内联进 JSON（自包含、体积大）；
+ * 不勾则只存文件名，照片跟着谱文件夹走。谱里一张照片都没有时
+ * （hasPhotos=false）连这一行都不渲染，别让用户白选。
  *
  * @param {object} opts
  * @param {number} opts.totalCount 全谱人数
- * @param {number} opts.relCount 全谱关系条数
- * @param {string} opts.treeLabel 当前页签的家族名（如「张三的家族」）
- * @param {number} opts.treeCount 当前家族人数
- * @param {number} [opts.treeRelCount] 当前家族关系条数
- * @param {string[]} [opts.omitted] 没被包含的家族名（用来讲清楚排除了谁）
- * @returns {Promise<'all'|'tree'|null>} null = 取消
+ * @param {number} opts.relCount   全谱关系数
+ * @param {string} opts.treeLabel  当前家族名
+ * @param {number} opts.treeCount  当前家族人数
+ * @param {number} opts.treeRelCount 当前家族关系数
+ * @param {string[]} opts.omitted 没被选中的家族页签名
+ * @param {boolean} [opts.hasPhotos] 谱里有没有照片引用
+ * @returns {Promise<{scope:'all'|'tree', photos:boolean}|null>} null = 取消
  */
 export function exportScopeDialog({
   totalCount = 0, relCount = 0,
   treeLabel = '', treeCount = 0, treeRelCount = 0,
   omitted = [],
+  hasPhotos = false,
 } = {}) {
   const overlay = document.getElementById('overlay');
   clearTimeout(overlay._clearTimer);
@@ -911,6 +918,11 @@ export function exportScopeDialog({
           </button>
         </div>
         <p class="confirm-text" style="margin-top:var(--sp-3)">只导当前家族 = 只导这一页上的人：含配偶<b>本人</b>（夫妻关系断了谱就不成立），但<b>不含</b>配偶的父母、兄弟姐妹。</p>
+        ${hasPhotos ? `
+        <label class="check-row" title="照片会以base64 内联进 JSON，文件自包含、体积大很多；不勾则只存文件名，照片跟着谱文件夹走">
+          <input type="checkbox" id="scopePhotos">
+          <span>包含照片（文件会大很多）</span>
+        </label>` : ''}
       </div>
       <div class="modal-foot">
         <button type="button" class="btn" data-scope="cancel">取消</button>
@@ -950,12 +962,19 @@ export function exportScopeDialog({
        别让回车什么都不发生。 */
     if (e.key === 'Enter') {
       e.preventDefault(); e.stopPropagation();
-      close(); done(scope);
+      close(); done(pick());
     }
   }
   document.addEventListener('keydown', onKey);
 
-  overlay.querySelector('[data-scope="ok"]').addEventListener('click', () => { close(); done(scope); });
+  /* 取值统一走 pick()：勾选状态从 DOM 现读，别在闭包里存一份 ——
+      存了的那份会在「用户勾了又改」之后说旧话。 */
+  const pick = () => ({
+    scope,
+    photos: !!overlay.querySelector('#scopePhotos')?.checked,
+  });
+
+  overlay.querySelector('[data-scope="ok"]').addEventListener('click', () => { close(); done(pick()); });
   overlay.querySelector('[data-scope="cancel"]').addEventListener('click', () => { close(); done(null); });
   overlay.querySelector('[data-scope="close"]').addEventListener('click', () => { close(); done(null); });
   overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) { close(); done(null); } });

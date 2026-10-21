@@ -284,6 +284,35 @@ await test('photos 数组往返还是数组（不是被序列化成字符串）'
   assert.deepEqual(back.photos, ['a.jpg', 'b.jpg']);
 });
 
+await test('F12：照片文件名形态（pme-abc123.png）与 avatar 文件名往返无损', () => {
+  store.writeDataset(normalizeDataset({
+    version: '1.0', viewpoint: 'x',
+    people: [{
+      id: 'x', name: '甲', sex: 'M',
+      avatar: 'pme-abc123.png',
+      photos: ['pme-abc123.png', 'pme-def456.png'],
+    }],
+    relationships: [],
+  }));
+  const back = normalizeDataset(store.readDataset()).people[0];
+  assert.equal(back.avatar, 'pme-abc123.png');
+  assert.deepEqual(back.photos, ['pme-abc123.png', 'pme-def456.png']);
+});
+
+await test('F12：脏路径字符原样往返（数据库不保证干净，干净由 photoStore 把在磁盘前）', () => {
+  /* photos 列就是「一行字」——历史数据、手工改库都可能塞进 ../ 之类。
+     db 层的职责只有一条：**原样进出，不静默改写**（改了就真假难辨）。
+     路径安全性在 electron/photoStore.js 的 assertInside，由 photos.test.js 钉住。 */
+  const dirty = ['..\\..\\genogram.db', 'a/b.png', 'C:\\x.png'];
+  store.writeDataset(normalizeDataset({
+    version: '1.0', viewpoint: 'x',
+    people: [{ id: 'x', name: '甲', sex: 'M', photos: dirty }],
+    relationships: [],
+  }));
+  const back = normalizeDataset(store.readDataset()).people[0];
+  assert.deepEqual(back.photos, dirty);
+});
+
 await test('中文与特殊字符不出乱码（UTF-8 全链路）', () => {
   const weird = '三太爷·「大舅子」/ 王 氏 100% <b>&amp;</b>';
   const multiline = "引号 '\"` 反斜杠 \\ 制表\t符\n第二行";

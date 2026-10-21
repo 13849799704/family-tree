@@ -426,19 +426,29 @@ export async function clearDataset() {
  * 导出。
  * 桌面版走系统「另存为」对话框（默认落数据目录）；
  * 网页版退回浏览器下载。
+ *
+ * @param {object} dataset 要导出的数据集（可能是 scopeToTree 裁剪后的副本）
+ * @param {string} [filename]
+ * @param {Object<string,string>|null} [photoMap] 「包含照片」时传 {文件名: dataUrl}；
+ *         会以顶层 `_photos` 嵌进 JSON，使文件自包含。不传 = 只存文件名。
  * @returns {Promise<{ok:boolean, name?:string, path?:string, error?:string, canceled?:boolean}>}
  */
-export async function exportFile(dataset, filename) {
+export async function exportFile(dataset, filename, photoMap = null) {
   const name = filename || defaultFilename();
   const b = bridge();
 
+  /* _photos 是**导出专用**的顶层字段：db:write 的 writeDataset 只读
+     people/relationships/version/viewpoint，天然忽略它 —— 所以这份文件
+     重新导入时，照片恢复与数据写入互不干扰（见 app.js 的导入流程）。 */
+  const text = photoMap ? serializeWithPhotos(dataset, photoMap) : serialize(dataset);
+
   if (b?.exportTo) {
-    const r = await b.exportTo(serialize(dataset), name);
+    const r = await b.exportTo(text, name);
     if (!r?.ok) return { ok: false, canceled: !!r?.canceled, error: r?.error };
     return { ok: true, name: baseName(r.path), path: r.path };
   }
 
-  const blob = new Blob([serialize(dataset)], {
+  const blob = new Blob([text], {
     type: 'application/json;charset=utf-8',
   });
   const url = URL.createObjectURL(blob);
@@ -450,6 +460,13 @@ export async function exportFile(dataset, filename) {
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1500);
   return { ok: true, name };
+}
+
+/** 带内联照片的导出文本（只在导出路径出现，不进库、不进 state.dataset） */
+function serializeWithPhotos(dataset, photoMap) {
+  const base = JSON.parse(serialize(dataset));
+  base._photos = photoMap;
+  return JSON.stringify(base, null, 2);
 }
 
 /**
@@ -514,11 +531,17 @@ function parseText(text, name) {
     if (!raw || !Array.isArray(raw.people)) {
       return { ok: false, error: '文件格式不对：缺少 people 数组' };
     }
+    /* 内联照片先摘下来：normalizeDataset 不认识 _photos，会被无声丢掉。
+       它跟着结果往下走，到「目的地谱就位」之后再落盘（app.js offerImport）。
+       形状不对（不是纯对象）就当没有，不报错 —— 旧版导出没有这个字段。 */
+    const photos = (raw._photos && typeof raw._photos === 'object' && !Array.isArray(raw._photos))
+      ? raw._photos
+      : null;
     const ds = normalizeDataset(raw);
     if (!ds.people.length) {
       return { ok: false, error: '文件里没有任何人物记录' };
     }
-    return { ok: true, dataset: ds, name };
+    return { ok: true, dataset: ds, name, photos };
   } catch (e) {
     return { ok: false, error: 'JSON 解析失败：' + (e?.message || e) };
   }
