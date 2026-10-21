@@ -4,6 +4,11 @@
   "private": true,
   "description": "族谱软件 · PC 桌面版 —— 核心是称谓自动推导，不是记录",
   "author": "lin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/13849799704/family-tree.git"
+  },
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
