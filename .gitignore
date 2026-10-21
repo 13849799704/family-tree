@@ -22,3 +22,8 @@ dist/
 # 库备份与老库迁移原件
 *.bak
 *.migrated-*
+
+# IDE / agent 工具目录：命令与技能定义、agent 记忆笔记 —— 工具状态，非项目源码。
+# 其中 .workbuddy/memory 是 agent 的会话记忆，可能带个人上下文，更不进版本控制
+.codebuddy/
+.workbuddy/

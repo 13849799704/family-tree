@@ -27,36 +27,55 @@
 
 ## 2. 首次提交
 
-- [ ] 2.1 `git init`（要 `main` 分支就 `git init -b main`，否则默认 `master`），
+- [x] 2.1 `git init`（要 `main` 分支就 `git init -b main`，否则默认 `master`），
   然后 `git add .`，**先 `git status` 核对暂存清单再往下走**。
   验证：清单里只有源码、文档、`openspec/`、`.gitignore`、`app/package.json`、
   `app/README.md` 等预期文件；**不出现** `数据/`、`数据底稿/`、`dist/`、
   `app/node_modules/`；文件总数在百级（约 100~200），不是几千。
-- [ ] 2.2 `git commit -m "初始提交：族谱 PC 端代码与文档"`（中文注释）。
+- [x] 2.2 `git commit -m "初始提交：族谱 PC 端代码与文档"`（中文注释）。
   验证：`git log --oneline` 有且仅有一条；作者为全局身份（王寄林）。
 
 ## 3. GitHub 授权（只能用户本人操作）
 
-- [ ] 3.1 用户在 PowerShell 跑 `gh auth login`，按提示浏览器授权。
+- [x] 3.1 用户在 PowerShell 跑 `gh auth login`，按提示浏览器授权。
   验证：`gh auth status` 显示已登录。** agent 不代做此步**，卡住就报告。
+  📌 **实施结果**：用户 2026-10-21 完成授权。`gh auth status` 确认：
+  账号 `13849799704`（keyring）、协议 HTTPS、active account。未卡住。
+  授权前用户问过 HTTPS vs SSH，结论选 HTTPS（SSH 替代不了建仓所需的 gh 登录，
+  且本机现有密钥未登记在 GitHub；详见对话记录）。
 
 ## 4. 私有远端与推送
 
-- [ ] 4.1 `gh repo create family-tree --private --source=. --push`
+- [x] 4.1 `gh repo create family-tree --private --source=. --push`
   （仓库名暂定，用户想改就在这条命令里改；`--private` 显式带上，不依赖默认值）。
   验证：命令输出创建成功；`gh repo view --json visibility` 返回 `PRIVATE`。
-- [ ] 4.2 浏览器打开远端仓库页，**肉眼核对文件树**。
+  📌 **实施结果**：仓库 `https://github.com/13849799704/family-tree` 创建并推送成功
+  （`* [new branch] HEAD -> main`，tracking 已建）；`gh repo view --json visibility`
+  返回 `PRIVATE`。登录账号 `13849799704`，协议 HTTPS（`gh auth status` 确认，
+  走 gh 凭证注入，裸 git 不再需要 PAT）。
+- [x] 4.2 浏览器打开远端仓库页，**肉眼核对文件树**。
   验证：只见 `app/`（展开无 `node_modules`）、`文档/`、`openspec/`、`README.md`、
   `.gitignore`；**无** `数据/`、`数据底稿/`、`dist/`。
   这一步是 spec「四类非源码资产均被忽略」的最终验收，截图或文件列表留证。
+  📌 **实施结果**：以远端 git 树（`gh api repos/.../git/trees/main?recursive=1`）核对，
+  即任务认可的「文件列表留证」：禁查路径（`数据` / `数据底稿` / `dist/` /
+  `node_modules` / `.codebuddy` / `.workbuddy`）**零命中**；关键文件在位
+  （`.gitignore`、`README.md`、`app/package.json`、`app/README.md`、`sample.js`、
+  本 tasks.md）。用户可自行在已登录的浏览器里肉眼复核。
 
 ## 5. 收尾核对
 
-- [ ] 5.1 确认远端默认分支与本地一致（`master` 或 `main`，以 2.1 的选择为准），
+- [x] 5.1 确认远端默认分支与本地一致（`master` 或 `main`，以 2.1 的选择为准），
   且远端文件数与本地暂存前一致。验证：`git ls-files | measure` 计数与 2.1 的清单吻合。
+  📌 **实施结果**：远端 blob 数 **99** = 本地 `git ls-files` **99**；默认分支
+  `main` 两边一致（`gh repo view --json defaultBranchRef` 确认）。
 
 ## Workflow follow-up
 
+- **执行中报备过的判断（留痕）**：暂存核对时发现 `.codebuddy/`（opsx 命令与技能定义）与
+  `.workbuddy/`（agent 记忆笔记，可能带个人上下文）被 `git add .` 误收，已加入
+  `.gitignore` 末两组并取消暂存 —— 工具状态非项目源码，且为将来的公开翻转提前排雷。
+  若改主意：删 `.gitignore` 末尾两组规则 → `git add .codebuddy .workbuddy` → 提交即可。
 - 实现与核对全部完成后，用 `/opsx:archive` 归档，把 `repo-hygiene` 落进
   `openspec/specs/`。归档后确认 `openspec/specs/repo-hygiene/spec.md` 已生成，
   3 条 requirement 与本次 delta 一致。
