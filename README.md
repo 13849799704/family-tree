@@ -446,7 +446,7 @@ npm run dist:publish
 ```
 
 `dist:publish` 就是 `dist` 加一个 `--publish always`：构建完成后自动在仓库上创建以版本号命名的
-Release（tag 形如 `v0.2.85`），并把安装版、免安装版和 `.blockmap` 一并挂上去。三个坑：
+Release（tag 形如 `v0.2.85`），并把安装版、免安装版和 `.blockmap` 一并挂上去。四个坑：
 
 - **必须先设 `GH_TOKEN`**。electron-builder 只读环境变量，**不会**复用 `gh` 的登录态
   （见 `node_modules/electron-publish/out/gitHubPublisher.js` 第 25 行，只认
@@ -460,6 +460,21 @@ Release（tag 形如 `v0.2.85`），并把安装版、免安装版和 `.blockmap
   ```bash
   $env:GH_TOKEN = gh auth token
   npx electron-builder --win --publish always --config.electronDist="D:\族谱pc端项目\app\node_modules\electron\dist"
+  ```
+- **结尾报 `422` 不代表发布失败，但必须去核对附件**。nsis 和 portable 各自触发一次发布，
+  两个任务并发 POST 同名 release，后到的那个会撞上 `422 Published releases must have a valid tag`
+  并让整条命令以失败退出。但 Release 通常**已经建好并上传成功**，只是可能少一两个附件
+  （实测 v0.2.85 就丢了 `.blockmap`）。所以每次发完必查：
+
+  ```bash
+  gh release view v0.2.85 --repo 13849799704/family-tree --json assets --jq ".assets[].name"
+  ```
+
+  应为三行：`Genogram-Setup-<版本>.exe`、`Genogram-Portable-<版本>.exe`、`Genogram-Setup-<版本>.exe.blockmap`。
+  缺哪个补哪个（`--clobber` 覆盖同名）：
+
+  ```bash
+  gh release upload v0.2.85 d:\族谱pc端项目\dist\Genogram-Setup-0.2.85.exe.blockmap --repo 13849799704/family-tree --clobber
   ```
 
 ### 7.4 装包后必须验的三件事
