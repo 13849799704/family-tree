@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>族谱软件 · 端到端回归测试</title>
+<style>
+  body{margin:0;font:12px/1.6 monospace;background:#fff;color:#111}
+  iframe{border:0;width:1400px;height:880px;position:absolute;left:-99999px;top:0}
+  #out{white-space:pre-wrap;padding:12px}
+  .lead{padding:12px 12px 0;font:12px/1.6 monospace;color:#666}
+</style>
+</head>
+<body>
+<div class="lead">
+  跑法（需要本地静态服务器 + 无头 Chrome）：<br>
+  1) node dev-server.js &nbsp;→&nbsp; http://127.0.0.1:5173<br>
+  2) chrome --headless=new --virtual-time-budget=45000 --window-size=1400,880 --dump-dom http://127.0.0.1:5173/tests/e2e.html<br>
+  结果全在下面 &lt;pre id="out"&gt; 里，直接看 dump 出来的 DOM 即可。
+</div>
+<pre id="out">running…</pre>
+<iframe id="f"></iframe>
+<script type="module">
+const f = document.getElementById('f');
+const out = document.getElementById('out');
+const tick = (ms = 260) => new Promise((r) => setTimeout(r, ms));
+const L = [];
+let fails = 0;
+const ok = (cond, msg) => { if (!cond) fails++; L.push((cond ? 'PASS  ' : 'FAIL  ') + msg); };
+
+// 关键：先清掉持久化数据，否则第二次跑会带上一次录入的人（节点数就对不上了）。
+// 同源，清的是 iframe 将要用的那份 localStorage。
+try { localStorage.clear(); } catch (e) { /* 忽略 */ }
+
+f.addEventListener('load', async () => {
+  await tick(2000);
+  const doc = f.contentDocument;
+  const win = f.contentWindow;
+  const q = (s) => doc.querySelector(s);
+  const qa = (s) => [...doc.querySelectorAll(s)];
+  const txt = (s) => (q(s)?.textContent || '').trim().replace(/\s+/g, ' ');
+
+  try {
+    /* ---------- 1. 初始渲染 ---------- */
+    L.push('=== 1. 初始渲染 ===');
+    ok(qa('.node').length === 20, `节点数 ${qa('.node').length}（期望 20）`);
+    ok(qa('.wires path, .wires line').length > 10, `连线 ${qa('.wires path, .wires line').length} 条`);
+    ok(txt('.call-main') === '我', `初始面板称谓 = ${txt('.call-main')}`);
+    ok(qa('.view-tab').length === 3, `家族 chips ${qa('.view-tab').length} 个`);
+
+    /* ---------- 2. 主树内点选称谓 ---------- */
+    L.push('');
+    L.push('=== 2. 主树内点选称谓 ===');
+    for (const [id, expect] of [
+      ['p_m', '妈妈'], ['p_f', '爸爸'], ['p_p2s', '二爷爷'], ['p_p2ss', '堂叔'],
+      ['p_cous', '堂弟'], ['p_aunt', '婶'], ['p_gu', '大姑'], ['p_unc', '小叔'],
+      ['p_sis', '嫂子'], ['p_nep', '侄子'],
+    ]) {
+      const el = doc.querySelector(`[data-id="${id}"]`);
+      if (!el) { ok(false, `${id} 不在主树里`); continue; }
+      const card = el.querySelector('.node-call').textContent.trim();
+      el.click();
+      await tick(70);
+      ok(card === expect && txt('.call-main') === expect,
+         `${id} 卡片「${card}」 面板「${txt('.call-main')}」(期望 ${expect})`);
+    }
+
+    /* ---------- 3. 妻子家族（姻亲） ---------- */
+    L.push('');
+    L.push('=== 3. 切到妻子家族 ===');
+    const tabs = qa('.view-tab');
+    const wifeTab = tabs.find((t) => /王雨桐/.test(t.textContent));
+    ok(!!wifeTab, '存在「王雨桐的原生家族」chip');
+    wifeTab?.click();
+    await tick(320);
+    L.push(`      切换后节点数 = ${qa('.node').length}，chip = ${txt('.view-tab.on')}`);
+    for (const [id, expect] of [
+      ['p_wf', '岳父'], ['p_wm', '岳母'], ['p_wg', '爷爷'],
+      ['p_wu', '大舅子'], ['p_wus', '内嫂'], ['p_wsis', '小姨子'], ['p_wnep', '内侄'],
+    ]) {
+      const el = doc.querySelector(`[data-id="${id}"]`);
+      if (!el) { ok(false, `${id} 不在妻子家族树里`); continue; }
+      const card = el.querySelector('.node-call').textContent.trim();
+      el.click();
+      await tick(70);
+      ok(card === expect, `${id} 卡片「${card}」(期望 ${expect})`);
+    }
+
+    /* ---------- 4. 母亲家族 ---------- */
+    L.push('');
+    L.push('=== 4. 切到母亲家族 ===');
+    qa('.view-tab').find((t) => /李慧兰/.test(t.textContent))?.click();
+    await tick(320);
+    for (const [id, expect] of [['p_mg', '外公'], ['p_mgw', '外婆'], ['p_mun', '大舅'], ['p_mbro', '表哥']]) {
+      const el = doc.querySelector(`[data-id="${id}"]`);
+      ok(el?.querySelector('.node-call').textContent.trim() === expect,
+         `${id} = ${el?.querySelector('.node-call').textContent.trim()}（期望 ${expect}）`);
+    }
+    qa('.view-tab')[0].click();
+    await tick(300);
+    ok(qa('.node').length === 20, `切回本家时 = ${qa('.node').length} 节点`);
+
+    /* ---------- 5. 体检 ---------- */
+    L.push('');
+    L.push('=== 5. 体检 ===');
+    doc.querySelector('[data-act="view-check"]').click();
+    await tick(300);
+    ok(q('#viewCheck').classList.contains('on'), '体检视图已显示');
+    ok(txt('.check-score b') === '0', `问题数 = ${txt('.check-score b')}`);
+    ok(qa('.check-group').length === 10, `分组 ${qa('.check-group').length} 个（8 检查 + 1 全绿横幅 + 1 概览）`);
+    doc.querySelector('[data-act="view-tree"]').click();
+    await tick(300);
+
+    /* ---------- 6. 录入（顶栏「添加成员」） ---------- */
+    L.push('');
+    L.push('=== 6. 录入 ===');
+    const addBtn = doc.querySelector('.topbar [data-act="add"]');
+    L.push(`      找到顶栏添加按钮 = ${!!addBtn}`);
+    addBtn.click();
+    await tick(500);
+    L.push(`      #overlay className = "${q('#overlay').className}"`);
+    L.push(`      #overlay innerHTML 长度 = ${q('#overlay').innerHTML.length}`);
+    L.push(`      .modal 存在 = ${!!q('.modal')}  form 存在 = ${!!q('form')}`);
+    L.push(`      toast = "${txt('#toastWrap').slice(0, 120)}"`);
+    ok(!!q('.modal'), '录入弹窗已打开');
+
+    if (q('.modal')) {
+      ok(qa('.form-block').length === 3, `表单分组 ${qa('.form-block').length} 个`);
+      ok(txt('.modal-sub').includes('只填事实'), `副标题：${txt('.modal-sub').slice(0, 30)}`);
+
+      /* 现行口径（ui/dialog.js 的 validate）：姓名 / 性别**允许留空** ——
+         留空即「待补信息」，不阻断录入，由体检 F8.8 提醒。
+         ⚠️ 这里原来断言「空姓名被拦」，与口径正好相反，是加 F8.8 时漏改的过期用例（2026-10-10 清）。
+         改为钉住现行口径的两件事：校验通路仍然有效、姓名确实不在校验项里。
+         之所以不真提交一次空姓名：提交成功会真的入库一个无名的人，
+         后面「节点数 21」和称谓断言全被带偏 —— 一个断言不该污染它要验的东西。 */
+      const fOpt = doc.createElement('option');
+      fOpt.value = 'p_m'; fOpt.textContent = '李慧兰';      // 女性，拿来当「父亲」
+      q('#f-father').appendChild(fOpt);                    // UI 里她只是排最后，不是选不到
+      q('#f-father').value = 'p_m';
+      q('form').dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+      await tick(200);
+      const err1 = txt('#form-err');
+      ok(q('#form-err').style.display === 'flex' && err1.includes('父亲'),
+         `性别冲突被拦：${err1.slice(0, 24) || '（无提示）'}`);
+      ok(q('#f-name').value === '' && !err1.includes('姓名'),
+         `姓名留空不触发「姓名」类错误（口径：留空 = 待补信息，体检 F8.8 提醒）`);
+      q('#f-father').selectedIndex = 0;                    // 复原，别影响下面的用例
+
+      // 给曾祖父（p_g1）再加一个儿子，排行 2 → 祖父辈旁支里的第三位 → 三爷爷
+      // ⚠️ 期望值在 v0.2.72 修正过一次：这里的人比「我」高两辈，path 是 F F B，
+      //   规则表 rankBase 是「爷爷」，所以叫**三爷爷**。「X太爷」那一档是曾祖父的
+      //   **兄弟**（path F F F B，rankBase '太爷'，叫太伯公 / 太叔公）—— 早先
+      //   这里误把两者搞混，写成「三太爷」，于是这条断言一直红着。
+      q('#f-name').value = '林建业';
+      doc.querySelector('[data-sex="M"]').click();
+      q('#f-birth').value = '1948';
+      q('#f-order').value = '2';
+      q('#f-father').value = 'p_g1';
+      q('form').dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+      await tick(500);
+      ok(!q('.modal'), '提交后弹窗关闭');
+      ok(txt('.name-line').includes('林建业'), `面板 = ${txt('.name-line')}`);
+      ok(txt('.call-main') === '三爷爷', `新人称谓 = ${txt('.call-main')}（期望三爷爷）`);
+      ok(qa('.node').length === 21, `节点数 = ${qa('.node').length}（期望 21）`);
+    }
+
+    /* ---------- 7. 添加亲属流程 ---------- */
+    L.push('');
+    L.push('=== 7. 添加亲属流程 ===');
+    doc.querySelector('[data-act="view-tree"]').click();
+    await tick(300);
+    doc.querySelector('[data-id="p_me"]').click();
+    await tick(200);
+    const arBtn = q('[data-act="add-relative"]');
+    ok(!!arBtn, '详情面板有「添加亲属」按钮');
+    arBtn?.click();
+    await tick(300);
+    ok(qa('.rel-pick').length === 4, `关系选择器选项 ${qa('.rel-pick').length} 个`);
+    const childBtn = qa('.rel-pick').find((b) => b.dataset.pick === 'child');
+    ok(!!childBtn, '有「子女」选项');
+    childBtn?.click();
+    await tick(400);
+    // ⚠️ 这里盯的是竞态 bug：close() 排 220ms 清空 overlay，open 只等 200ms ——
+    //    不取消那个定时器，弹窗会一闪即逝。
+    ok(!!q('.modal'), '选完关系后打开录入弹窗');
+    ok(txt('.modal-sub').includes('林然'), `副标题体现参照人：${txt('.modal-sub')}`);
+    if (q('.modal')) {
+      q('#f-name').value = '林小满二';
+      doc.querySelector('[data-sex="F"]').click();
+      q('#f-birth').value = '2022';
+      q('form').dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true }));
+      await tick(500);
+      // ⚠️ 期望值在 v0.2.72 修正：rules.js 的 D 规则注明「2026-10-11 用户定：叫『女儿』」，
+      //   此前用南阳口语「姑娘」，与「儿子」不对称。早先这里按「姑娘」断言，一直红着。
+      ok(txt('.call-main') === '女儿', `新增女儿称谓 = ${txt('.call-main')}（与「儿子」对称，叫「女儿」）`);
+    }
+
+    /* ---------- 8. 初始视角健壮性：容器零尺寸时不许静默 clamp ---------- */
+    L.push('');
+    L.push('=== 8. 零尺寸容器下 fit() / focusOn() 的行为 ===');
+    {
+      const { TreeCanvas } = await import('../src/ui/tree.js');
+      const { LAYOUT } = await import('../src/core/layout.js');
+      const host = doc.createElement('div');
+      host.style.cssText = 'position:absolute;left:-99999px;top:0;width:0;height:0';
+      const canvasEl = doc.createElement('div');
+      const wiresEl = doc.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      host.append(canvasEl, wiresEl);
+      doc.body.appendChild(host);
+
+      const c = new TreeCanvas({
+        canvasEl, wiresEl, stageEl: host,
+        onSelect() {}, onToggleFamily() {},
+      });
+      // fit()/focusOn() 只读 state.view，直接注入最小 state 即可，无需真切渲染
+      c.state = { view: { tree: null, pos: { p_x: { x: 100, y: 200 } }, bounds: { minX: 0, minY: 0, maxX: 1200, maxY: 700 } } };
+
+      const rFit = c.fit();
+      ok(rFit === false && c.zoom === 1,
+         `零尺寸：fit()=${rFit}、zoom 保持 ${c.zoom}（旧逻辑会静默变成被 clamp 的 0.35）`);
+      const rFocus = c.focusOn('p_x', false);
+      ok(rFocus === false, `零尺寸：focusOn()=${rFocus}（不把节点"居中"到左上角）`);
+
+      // 补上尺寸后应当正常工作
+      host.style.width = '800px';
+      host.style.height = '600px';
+      const rFit2 = c.fit();
+      ok(rFit2 === true && c.zoom > 0.35,
+         `恢复尺寸后：fit()=${rFit2}、zoom=${Math.round(c.zoom * 100)}%（>35% 说明读数不再是兜底值）`);
+      ok(c.focusOn('p_x', false) === true, '恢复尺寸后：focusOn() 正常执行');
+
+      /* ---------- 8b. 体检跳转的「放大 + 居中」（2026-10-10 新增） ----------
+         体检清单点人名 → 跳到家族树并放大到 100%，跳过去是为了改这个人。
+         zoomTarget 不传（搜索命中 / 详情面板跳转）时必须保持原倍率不变。 */
+      c.zoom = 0.5;                       // 假装刚被 fit() 缩成 50%
+      c.focusOn('p_x', false);
+      ok(c.zoom === 0.5, `不传 zoomTarget：倍率保持 ${Math.round(c.zoom * 100)}%（搜索跳转不该被拽着变）`);
+
+      c.zoom = 0.5;
+      c.focusOn('p_x', false, 1.0);
+      ok(c.zoom === 1, `传 zoomTarget=1：${Math.round(0.5 * 100)}% → ${Math.round(c.zoom * 100)}%（体检跳转要放大才看得清）`);
+
+      c.zoom = 1.5;
+      c.focusOn('p_x', false, 1.0);
+      ok(c.zoom === 1.5, `只放大不缩小：已 150% 时点体检，仍是 ${Math.round(c.zoom * 100)}%（不拽回 100%）`);
+
+      // 放大后必须仍然居中 —— 先算平移再改倍率就会偏
+      c.zoom = 0.5;
+      c.focusOn('p_x', false, 1.0);
+      const r = host.getBoundingClientRect();
+      const cx = c.tx + (100 + LAYOUT.NODE_W / 2) * c.zoom;   // 节点中心在视口内的 x
+      ok(Math.abs(cx - r.width / 2) < 1,
+         `放大后仍居中：节点中心 x=${cx.toFixed(1)} vs 视口中心 ${(r.width / 2).toFixed(1)}`);
+
+      host.remove();
+    }
+
+    /* ---------- 9. 「只显示姓名」开关（v0.2.54） ---------- */
+    L.push('');
+    L.push('=== 9. 只显示姓名开关 ===');
+    {
+      const toggle = q('#callToggle');
+      ok(!!toggle, '顶栏有「只显示姓名」按钮');
+      ok(toggle?.getAttribute('aria-pressed') === 'false', `默认 aria-pressed=${toggle?.getAttribute('aria-pressed')}（默认仍显示称谓）`);
+      ok(toggle?.classList.contains('on') === false, '默认不是高亮态');
+
+      // 先在「显示称谓」状态下把基准值抓下来：卡片大字 / 姓名小字 / 面板大字
+      const nM = doc.querySelector('[data-id="p_m"]');
+      const nameM = nM.querySelector('.node-name').textContent.trim();   // 姓名
+      const callM = nM.querySelector('.node-call').textContent.trim();   // 称谓
+      ok(!!nameM && !!callM && nameM !== callM, `基准：卡片大字「${callM}」+ 小字「${nameM}」`);
+      nM.click();
+      await tick(150);
+      ok(txt('.call-main') === callM, `面板大字 = ${txt('.call-main')}（期望 ${callM}）`);
+      ok(!!q('.call-std') && !!q('.call-path'), '称谓模式下标准称呼 / 推导路径都在');
+
+      // 关掉：卡片大字换成姓名，小字不再画
+      toggle.click();
+      await tick(250);
+      ok(toggle.getAttribute('aria-pressed') === 'true', '点一下后 aria-pressed=true');
+      ok(toggle.classList.contains('on'), '按钮进入高亮态');
+      const nM2 = doc.querySelector('[data-id="p_m"]');
+      ok(nM2.querySelector('.node-call').textContent.trim() === nameM,
+         `卡片大字 = ${nM2.querySelector('.node-call').textContent.trim()}（期望姓名 ${nameM}）`);
+      ok(!nM2.querySelector('.node-name'), '姓名小字不再重复出现');
+      ok(qa('.node .node-call').every((n) => !n.classList.contains('unknown')),
+         '全部卡片都不再挂「关系待确认」的样式');
+
+      // 面板：只有姓名，标准称呼 / 路径 / 推导块全没了
+      nM2.click();
+      await tick(150);
+      ok(txt('.call-main') === nameM, `面板大字 = ${txt('.call-main')}（期望 ${nameM}）`);
+      ok(!q('.call-std'), '标准称呼已隐藏');
+      ok(!q('.call-path'), '推导路径已隐藏');
+      ok(!q('.rel-chain'), '「称谓推导」整块已隐藏');
+      ok(!txt('.name-line').includes(nameM),
+         `姓名不在下方重复一行：name-line = "${txt('.name-line')}"`);
+
+      // 亲属关系行只留姓名
+      // ⚠️ 期望值在 v0.2.72 修正：妈妈是李慧兰，她的父亲是外公李长顺（p_mg）。
+      //   早先这里写「林志远」，是示例数据还没改时的旧值。
+      const fatherA = q('.panel-body .field .v a');
+      ok(!!fatherA && fatherA.textContent.trim() === '李长顺',
+         `父亲行 = ${fatherA?.textContent.trim()}（姓名模式下不带称谓前缀，期望李长顺）`);
+
+      // 再点回来：逐字恢复
+      toggle.click();
+      await tick(250);
+      ok(toggle.getAttribute('aria-pressed') === 'false', '再点一下回到默认态');
+      const nM3 = doc.querySelector('[data-id="p_m"]');
+      ok(nM3.querySelector('.node-call').textContent.trim() === callM,
+         `卡片大字恢复成「${callM}」`);
+      ok(nM3.querySelector('.node-name')?.textContent.trim() === nameM, '姓名小字回来了');
+      nM3.click();
+      await tick(150);
+      ok(txt('.call-main') === callM, `面板大字恢复成「${callM}」`);
+      ok(!!q('.call-std') && !!q('.call-path') && !!q('.rel-chain'), '称谓区全部回来了');
+    }
+
+    /* ---------- 10. 搜索 · 拼音（v0.2.72，F10） ----------
+       拼音搜索的两条「反直觉」口径都在这里钉住：
+         ① 拼音命中的行，姓名右边要补一个弱化的拼音串（否则用户不知道搜到了啥）；
+② 拼音**不允许**回车直跳 —— 与姓名全等分开，口径只有一套。 */
+    L.push('');
+    L.push('=== 10. 搜索 · 拼音 ===');
+    {
+      const input = q('#searchInput');
+      const menu = q('#searchMenu');
+      const menuOpen = () => !!menu && !menu.hidden;
+      const type = async (v) => {
+        input.value = v;
+        input.dispatchEvent(new win.Event('input', { bubbles: true }));
+        await tick(320);            // 打字有 120ms 防抖
+      };
+      const pressEnter = () => {
+        input.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        return tick(320);
+      };
+
+      // ④ 输入框必须写明能输拼音，否则用户根本不知道 lcs 能搜人
+      ok(/拼音/.test(input?.getAttribute('placeholder') || ''),
+         `placeholder 写明可输拼音：${input?.getAttribute('placeholder')}`);
+
+      // 首字母命中（李长顺：长 有 chang / zhang 两读 → lcs / lzs）
+      await type('lcs');
+      ok(menuOpen(), '输入 lcs 后结果浮层打开');
+      const pyName = q('.sr-item .sr-name')?.textContent.trim() || '';
+      const pyForm = q('.sr-item .sr-pinyin')?.textContent.trim() || '';
+      ok(!!pyForm, '拼音命中行带 .sr-pinyin');
+      ok(pyForm === 'lcs', `拼音行展示命中的拼音串 = 「${pyForm}」（期望 lcs）`);
+      ok(!!pyName, `该行仍有姓名（${pyName}）`);
+
+      // ★ 拼音命中不许回车直跳（口径与「姓名全等」分开）
+      await pressEnter();
+      ok(menuOpen(), '拼音命中按回车仍开列表（不替用户挑人）');
+
+      // 多音字另一读音也认
+      await type('lizhangshun');
+      ok(menuOpen() && (q('.sr-item .sr-name')?.textContent.trim() || '').includes('李长顺'),
+         '全拼 lizhangshun 也命中李长顺（长 读 zhang 时）');
+
+      // 生僻字不猜：搜不到就说搜不到，不给模糊结果
+      await type('lngshun');
+      ok(!menuOpen(), '掐掉中间的 lngshun 搜不到（不做中间省略）');
+
+      // 姓名命中行**不**带拼音串
+      await type('林志');
+      ok(menuOpen(), '输入中文「林志」出候选');
+      ok(!q('.sr-item .sr-pinyin'), '姓名命中的行不额外展示拼音串');
+
+      // 姓名全等照旧可以直接跳（这条不能被拼音改动牵连）
+      await type('李长顺');
+      await pressEnter();
+      ok(!menuOpen(), '姓名全等按回车直接跳转（浮层关闭）');
+      ok(txt('.call-main') !== '', `已跳到该人，面板大字 = ${txt('.call-main')}`);
+
+      input.value = '';
+      input.dispatchEvent(new win.Event('input', { bubbles: true }));
+      await tick(200);
+    }
+  } catch (e) {
+    fails++;
+    L.push('EXCEPTION: ' + (e && e.stack || e));
+  }
+
+  out.textContent = L.join('\n') + `\n\n===== ${fails ? fails + ' FAILED' : 'ALL PASSED'} =====`;
+});
+
+// 清完 localStorage 再挂 src，确保 iframe 冷启动
+f.src = '../index.html';
+</script>
+</body>
+</html>

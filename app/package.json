@@ -1,0 +1,117 @@
+{
+  "name": "family-tree",
+  "version": "0.2.81",
+  "private": true,
+  "description": "族谱软件 · PC 桌面版 —— 核心是称谓自动推导，不是记录",
+  "author": "lin",
+  "type": "module",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "node scripts/launch.js",
+    "dev": "node scripts/launch.js",
+    "web": "node dev-server.js",
+    "test": "node tests/run.js && node tests/db.test.js && node tests/library.test.js",
+    "test:core": "node tests/run.js",
+    "test:db": "node tests/db.test.js",
+    "test:lib": "node tests/library.test.js",
+    "test:e2e": "node scripts/launch.js tests/electron-smoke.js",
+    "test:edit": "node scripts/launch.js tests/edit-dialog.test.js",
+    "test:acc": "node scripts/launch.js tests/acc-input.test.js",
+    "test:delete": "node scripts/launch.js tests/delete-flow.test.js",
+    "test:book": "node scripts/launch.js tests/book-flow.test.js",
+    "test:delrepro": "node scripts/launch.js tests/repro-delete-current.test.js",
+    "db:inspect": "node scripts/inspect-db.js",
+    "dist": "electron-builder --win",
+    "dist:dir": "electron-builder --win --dir"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "comment": "core/ 与 ui/ 仍是零依赖纯 JS —— 新增的 html2canvas（导出图片，MIT）只在渲染层用，不进 core/，所以 core 的单测套件依然零 DOM 零依赖；桌面壳用 Electron，存储用 sql.js（SQLite 的 WASM 版，无需原生编译）。数据落在 D:\\族谱pc端项目\\数据\\。",
+  "dependencies": {
+    "html2canvas": "^1.4.1",
+    "sql.js": "^1.14.2"
+  },
+  "devDependencies": {
+    "electron": "^44.4.2",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.lin.genogram",
+    "productName": "家族谱",
+    "copyright": "Copyright © 2026 lin",
+    "directories": {
+      "output": "../dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "**/*",
+      "!_*",
+      "!**/*.log",
+      "!tests{,/**/*}",
+      "!scripts{,/**/*}",
+      "!build{,/**/*}",
+      "!dev-server.js",
+      "!*.md",
+      "!preview-*.png",
+      "!check*.txt",
+      "!server.err",
+      "!test-deceased.html",
+      "!.npmrc",
+      "!package-lock.json",
+      "!**/*.map",
+      "!node_modules/sql.js/dist/*.zip",
+      "!node_modules/sql.js/dist/*debug*",
+      "!node_modules/sql.js/dist/worker*",
+      "!node_modules/sql.js/dist/sql-asm*",
+      "!node_modules/sql.js/dist/sql-wasm-browser*",
+      "!node_modules/sql.js/.devcontainer",
+      "!node_modules/sql.js/.eslintrc.js",
+      "!node_modules/sql.js/.jsdoc.config.json",
+      "!node_modules/sql.js/.nojekyll",
+      "!node_modules/sql.js/eslint.config.cjs",
+      "!node_modules/sql.js/AUTHORS",
+      "!node_modules/sql.js/CONTRIBUTING.md",
+      "!node_modules/sql.js/README.md",
+      "!node_modules/sql.js/documentation_index.md",
+      "!node_modules/sql.js/logo.svg"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/sql.js/dist/sql-wasm.wasm"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "Genogram-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "族谱",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh",
+      "language": "2052",
+      "artifactName": "Genogram-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "Genogram-Portable-${version}.${ext}"
+    }
+  }
+}

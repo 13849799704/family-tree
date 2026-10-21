@@ -1,0 +1,1115 @@
+/* =========================================================
+   族谱软件 · 应用样式
+   ---------------------------------------------------------
+   来源：族谱软件-UI设计稿v1.html
+   改动：
+     · 视觉规则原样保留
+     · 移除「设计规范页」样式（那是设计交付物，不是应用功能）
+     · 修复原稿 .rail-btn.on::before 的无效 CSS（left:-var(--sp-3)）
+     · 新增：体检面板、关系描述行、空状态、Toast
+   ========================================================= */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  color: var(--ink-700);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+button { cursor: pointer; border: 0; background: none; }
+:focus-visible { outline: none; box-shadow: var(--shadow-focus); border-radius: var(--r-sm); }
+
+/* ---------- 图标尺寸基线（v0.2.73） ----------
+   ui/icons.js 的 wrap() 只输出 viewBox、不写 width/height（见该文件顶部
+   注释：「尺寸由外层 CSS 决定」）。这条约定靠每个调用点的容器自觉维护，
+   一旦漏写，<svg> 会掉进 CSS 默认对象尺寸算法 —— 有内在宽高比 1:1、
+   宽高都是 auto，先落 300×150 再按比例修正成 **300×300**，一个图标占满
+   整行面板。故在这里兜一个 1em，把「漏写」的后果从撑破布局降级为按字号渲染。
+
+   ⚠️ :not(.wires) 不能省 —— 画布连线层 <svg class="wires"> 的宽高**不在 CSS 里**，
+      是 ui/tree.js 每次渲染/重排时用 setAttribute 按当前树的包围盒注入的。
+      而 CSS 声明的优先级高于 SVG presentation attribute，命中它就会把整棵树的
+      连线层压成 1em —— **不报错、不白屏，只是线全没了**。排除它之后 .wires 仍
+      完全由 tree.js 掌控，也就不需要给它补任何显式宽高规则。
+
+   ⚠️ 用 :where() 保持 0 特异度 —— :not() 会吃掉参数里 .wires 的类特异度，
+      写成 svg:not(.wires) 会是 (0,1,1)，与 .photo svg 等组件规则平手、靠源码
+      先后顺序决胜；:where() 归零后任何组件级 `X svg {}` 都稳赢。 */
+:where(svg:not(.wires)) { width: 1em; height: 1em; }
+
+/* 屏幕阅读器专用（视觉隐藏） */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* =========================================================
+   应用骨架：顶栏 + 左导航轨 + 主画布 + 右详情
+   ========================================================= */
+.app { height: 100vh; display: flex; flex-direction: column; }
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  height: var(--topbar-h); flex: 0 0 var(--topbar-h);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--line-200);
+  display: flex; align-items: center; gap: var(--sp-3);
+  padding: 0 var(--sp-4);
+  z-index: 20;
+}
+/* 品牌区。v0.2.76 起**只剩一个图标**（文字从 index.html 删掉了）。
+
+   ⚠️ 这里记着一条已解决的 bug，别删：
+   原来这里是「谱标 + 应用名 + 副标题」，靠 `.brand { flex: 0 0 auto }` +
+   `.brand-text { white-space: nowrap }` 锁住不许压 —— 因为 flex 收缩时按各 item 的
+   **min-content** 分配压力，而**中文可以逐字断行** → .brand-text 的 min-content
+   约等于**一个字宽**，地板形同虚设，它成了顶栏里第三容易被牺牲的项。
+   而它让位的方式（换行）是整条顶栏里**唯一会纵向撑破布局**的失效模式：
+   别的项让位只是变窄（顶多触发省略号），它让位是变高。顶栏高度固定
+   `--topbar-h: 52px` 且**没有 overflow 裁剪**，折出来的文字直接画在 z-index:20
+   的顶栏之上、盖住画布。实测（tests/topbar-layout.html）：窗口 1024 宽时
+   brandText 高 76~93px，topbar 只有 52px，上下各溢出十余像素。
+
+   既然锁宽度也躲不掉换行，而那 66px 在 minWidth 1024 下又是实打实的缺口
+   （顶栏被压到缩放组被自己的 overflow:hidden 裁掉 24px、搜索框文字区只剩 −2px），
+   **索性把文字删掉** —— 窗口标题栏已经写着「家族谱 · 称谓自动推导」，顶栏再写一遍
+   是冗余。锁宽度的那条 flex: 0 0 auto 留着：现在它是纯图标，锁了才不会被压成
+   20px 的小方块。
+
+   ⚠️ 下一轮会把顶栏改成真正的窗口标题栏（titleBarStyle:hidden +
+   titleBarOverlay），届时这里会成为窗口拖拽区，可交互子元素要加
+   -webkit-app-region: no-drag。 */
+.brand {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding-right: var(--sp-3); border-right: 1px solid var(--line-100);
+  flex: 0 0 auto;
+}
+.brand-mark {
+  width: 26px; height: 26px; border-radius: var(--r-sm);
+  background: linear-gradient(140deg, var(--primary-500), var(--primary-700));
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 13px; font-weight: var(--fw-semibold);
+  box-shadow: var(--shadow-xs);
+}
+/* v0.2.76：.brand-text 与 .brand-text small 已随「品牌区只留图标」一并删除
+   （元素从 index.html 移除，规则也不留 —— 留着就是没人能删的死重量）。
+   那两条规则当年是这么写的，留个存档：
+     .brand-text { font-size: var(--fs-lg); font-weight: var(--fw-semibold);
+                   color: var(--ink-900); letter-spacing: .02em; white-space: nowrap; }
+     .brand-text small { display: block; font-size: var(--fs-xs);
+                         font-weight: var(--fw-regular); color: var(--ink-400);
+                         letter-spacing: 0; margin-top: -2px; } */
+
+/* =========================================================
+   族谱库控件（v0.2.24）· 当前谱 + 下拉切换
+   ---------------------------------------------------------
+   ⚠️ 与右边的 .view-switch 刻意做成不同形状：
+      · 本控件是一个带图书图标的实心胶囊（换「哪一套数据」）
+      · .view-switch 是一排内嵌 chips（换「同一套里的哪棵树」）
+      用户靠形状就能分辨，不会把两个「切换」搞混。
+   ========================================================= */
+/* 族谱库胶囊。v0.2.76 起**允许收缩**（原先是 flex: 0 0 auto）。
+
+   ⚠️ 这里曾经有一处**注释与实现矛盾**（改动前）：
+   下面 .bc-name 那条注释写着「顶栏横向空间紧张：谱名过长时截断」，而且省略号
+   四件套（overflow + text-overflow + white-space + max-width）全都齐了 ——
+   但外层是 `flex: 0 0 auto`，谱名在 flex 压力下**永远不可能**触发截断。
+   那套机制只在自己超过 max-width:116px 时生效，跟窗口宽窄毫无关系。
+   **作者写的意图从来没被实现过。**
+
+   现在改成 flex: 0 1 auto + min-width: 0，注释才终于成立：
+   窗口窄下来时压力优先由谱名承担（它有省略号机制，让位最划算），
+   而不是把 .search 压到只剩 64px、或让 .view-switch 被静默裁掉页签。
+
+   地板约 93px = 书图标 15 + 人数 27 + 下拉箭头 13 + padding 22 —— 这三样都是
+   flex: 0 0 auto，不会被压，所以省略号只出现在名字位置，最坏也认得出是哪个谱。
+
+   ⚠️ 这里**刻意不加 `min-width: 0`**（v0.2.76 实测踩过两次）：
+     ① 加了它，外层会被压得比胶囊本身窄 → 胶囊溢出到 .view-switch 上（已由
+        .book-chip 的 max-width: min(232px,100%) 兜住）；
+     ② 但反过来只给 .bc-name 加 min-width:3em 也不够 —— 胶囊**盒子内部装不下**，
+        内容右溢 20px，而 .view-switch 在 DOM 里靠后、会盖在它上面，胶囊右端的
+        人数与下拉箭头被页签遮住（实测 scrollWidth 140 > clientWidth 120，
+        这层溢出 rect 查不到，只有 scrollWidth/clientWidth 能看到）。
+     让外层保持 min-width:auto（由内容决定地板）最省事：胶囊装得下，外层自然
+     不会缩到装不下，且这个地板是**算出来的**、不用手写数字。 */
+.book-sw { position: relative; flex: 0 1 auto; }
+
+.book-chip {
+  height: 32px; padding: 0 var(--sp-2) 0 var(--sp-3);
+  display: inline-flex; align-items: center; gap: var(--sp-2);
+  border: 1px solid var(--line-200); border-radius: var(--r-full);
+  background: var(--bg-surface); color: var(--ink-700);
+  font-size: var(--fs-md); font-weight: var(--fw-medium);
+  transition: var(--t-fast);
+  /* ⚠️ min() 而不是裸的 232px —— 这是 v0.2.76 修的一个**回归**：
+     .book-sw 拿到 flex: 0 1 auto 之后会被压得比胶囊本身窄，而 .book-chip 是
+     inline-flex（宽度走 shrink-to-fit）；.bc-name 上的 white-space:nowrap 又让
+     它的 min-content 等于整段谱名宽度，于是胶囊的「最小尺寸」被那句长名字撑住，
+     外层缩了、内层没缩 —— 胶囊就**溢出到右边的 .view-switch 上画去了**
+     （实测最坏情况 chip 209 > bookSw 122，重叠 71px）。
+     max-width: min(232px, 100%) 让胶囊永远不超过它的外层。 */
+  max-width: min(232px, 100%);
+}
+.book-chip:hover { border-color: var(--primary-500); color: var(--primary-600); background: var(--primary-100); }
+.book-chip > svg { flex: 0 0 15px; width: 15px; height: 15px; color: var(--primary-600); }
+/* 谱名。省略号四件套齐全，配合上面 .book-sw 的 flex: 0 1 auto + min-width: 0，
+   谱名既能在超过 max-width 时被截断，也能在窗口变窄时被 flex 压窄（v0.2.76 起）。
+   min-width: 0 是必需的那一环 —— 没有它，flex item 的 min-width:auto 会让
+   .bc-name 停在内容宽度，.book-sw 压不动、整个省略号机制就是空转。
+
+   ⚠️ 但 min-width: 0 不能是最终值（v0.2.76 实测踩到）：修好胶囊溢出之后
+   .bc-name 真的开始让位了，**让过头** —— 默认宽度下实测 `bcName=0`，
+   芯片里只剩书本图标 + 人数 + 箭头，完全认不出是哪个谱。而这个软件里可能
+   有好几本谱，「是哪个谱」的入口不该退化成纯图标（悬停 title 能看全名，但
+   窄窗口下人未必会去悬停）。所以给一个 3em 的下限：.bc-name 继承 .book-chip
+   的 --fs-md = 13px，3em ≈ 39px，露出三个汉字。
+   这 39px 的压力会落到家族页签上，但它们同一版本起已可收缩、标签会进一步
+   省略号，三个页签仍在（tests/topbar-layout.html 的第 5 组断言守住）。 */
+.bc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 116px; min-width: 3em; }
+.bc-count { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--ink-400); font-family: var(--font-num); }
+.bc-caret { flex: 0 0 auto; display: inline-flex; opacity: .55; transition: var(--t-fast); }
+.bc-caret svg { width: 13px; height: 13px; }
+.book-chip[aria-expanded="true"] {
+  border-color: var(--primary-500); background: var(--primary-100);
+  color: var(--primary-700); box-shadow: var(--shadow-focus);
+}
+.book-chip[aria-expanded="true"] .bc-caret { transform: rotate(180deg); }
+
+.book-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 60;
+  width: 268px; max-height: 380px; overflow-y: auto;
+  background: var(--bg-surface); border: 1px solid var(--line-200);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-lg);
+  padding: var(--sp-2);
+}
+.book-menu[hidden] { display: none; }
+.book-menu-title {
+  font-size: var(--fs-xs); color: var(--ink-400); letter-spacing: .06em;
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
+}
+.book-list { display: flex; flex-direction: column; gap: 2px; }
+.book-menu-sep { height: 1px; background: var(--line-100); margin: var(--sp-2) 0; }
+
+.book-item {
+  display: flex; align-items: center; gap: var(--sp-2);
+  height: 34px; padding: 0 var(--sp-2); border-radius: var(--r-sm);
+  font-size: var(--fs-md); color: var(--ink-700); text-align: left;
+  transition: var(--t-fast); width: 100%;
+}
+.book-item svg { flex: 0 0 15px; width: 15px; height: 15px; color: var(--ink-400); }
+.book-item:hover { background: var(--bg-hover); color: var(--ink-900); }
+.book-item.on { color: var(--primary-600); font-weight: var(--fw-semibold); background: var(--primary-100); }
+.book-item.on svg { color: var(--primary-600); }
+.bi-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bi-sub { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--ink-400); }
+.bi-check { flex: 0 0 auto; color: var(--primary-600); font-weight: var(--fw-semibold); }
+.bi-count { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--ink-400); font-family: var(--font-num); }
+.book-item.danger { color: var(--danger); }
+.book-item.danger svg { color: var(--danger); }
+.book-item.danger:hover { background: var(--danger-bg); color: var(--danger); }
+
+/* 视角切换 chips */
+.view-switch {
+  display: flex; align-items: center; gap: var(--sp-1);
+  background: var(--bg-sunken); padding: 3px; border-radius: var(--r-md);
+  min-width: 0; overflow-x: auto; scrollbar-width: none;
+}
+.view-switch::-webkit-scrollbar { height: 0; }
+.view-tab {
+  height: 28px; padding: 0 var(--sp-3); border-radius: var(--r-sm);
+  font-size: var(--fs-sm); font-weight: var(--fw-medium); color: var(--ink-500);
+  display: inline-flex; align-items: center; gap: var(--sp-1);
+  transition: var(--t-fast);
+  /* ⚠️ v0.2.76：flex: 0 0 auto → 0 1 auto（这是同一个毛病的第三次出现）。
+     .tab-label 早就备好了省略号四件套（overflow/text-overflow/white-space/min-width），
+     但 .view-tab 是 flex: 0 0 auto 不收缩，于是那套机制**从未被实现**——
+     跟当年 .bc-name 的情况一模一样。三个页签装不下就溢出，被 .view-switch 的
+     overflow-x:auto 裁掉，而滚动条又被 scrollbar-width:none + height:0 双重藏掉，
+     用户既看不出「还有更多」也滚不过去（实测最坏情况需求 541px、容器只有 293px）。
+     改成可收缩后 .tab-label 的省略号终于生效，三个页签都在。 */
+  white-space: nowrap; flex: 0 1 auto; max-width: 200px; min-width: 0;
+}
+.view-tab svg { flex: 0 0 13px; width: 13px; height: 13px; }
+.tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.tab-count { flex: 0 0 auto; font-size: 11px; opacity: .5; }
+.view-tab:hover { color: var(--ink-700); background: rgba(255, 255, 255, .6); }
+.view-tab.on { background: var(--bg-surface); color: var(--primary-600); box-shadow: var(--shadow-xs); font-weight: var(--fw-semibold); }
+.view-tab.on.scope-affinal { color: var(--affinal); }
+
+/* 待补录的家族页（配偶没录父母）—— 虚线边框跟普通页区分开，
+   提醒「这一页还缺东西」，但不用刺眼的红色，那不是错误。 */
+.view-tab.scope-pending {
+  border-style: dashed;
+  opacity: .85;
+}
+.view-tab.on.scope-pending { opacity: 1; }
+
+/* 搜索 */
+.search { position: relative; flex: 1; max-width: 300px; }
+.search-ico {
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; color: var(--ink-400); pointer-events: none;
+}
+.search input {
+  width: 100%; height: 32px; border-radius: var(--r-md);
+  border: 1px solid var(--line-200); background: var(--bg-sunken);
+  padding: 0 var(--sp-8) 0 30px; font-size: var(--fs-md); color: var(--ink-900);
+  /* ⚠️ 刻意**不**过渡 padding —— v0.2.76 实测踩过：
+     顶栏切窄态时会改 padding-right（32 → 8），而 `transition: var(--t-fast)`
+     把 padding 也一起过渡了，于是**同步读 getComputedStyle 会读到动画中间值**：
+     同一个 94px 宽度，文字区一会儿量到 52px、一会儿量到 28px（连跑三次红两次）。
+     窄态判定（syncTopbarNarrow）读的正是这个值，拿到中间值就会算错。
+     只过渡纯视觉属性，padding 立即生效 —— 顺带也不引发布局抖动。 */
+  transition: border-color var(--t-fast), box-shadow var(--t-fast), background-color var(--t-fast);
+}
+.search input::placeholder { color: var(--ink-300); }
+/* 输了字就把 ⌘K 提示收起来 —— type="search" 的原生清除按钮（✕）在右边，
+   它和 kbd 都在 right:8px，一输入就叠在一起。 */
+.search input:not(:placeholder-shown) ~ kbd { display: none; }
+.search input:hover { background: var(--bg-surface); border-color: var(--line-300); }
+.search input:focus { background: var(--bg-surface); border-color: var(--primary-500); box-shadow: var(--shadow-focus); }
+.search kbd {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  font-family: var(--font-num); font-size: 10px; color: var(--ink-300);
+  border: 1px solid var(--line-200); border-radius: var(--r-xs);
+  padding: 1px 5px; background: var(--bg-surface); pointer-events: none;
+}
+
+/* 搜索结果浮层（v0.2.55）。
+   视觉沿用 .book-menu / .book-item —— 全项目只有这一种浮层语言，
+   别自创一套，不然顶栏两个下拉长得不一样会显得是两个人写的。
+
+   ⚠️ v0.2.76 加 min-width 的原因（手验阶段发现的**预存**问题，不是那次改出来的）：
+   上面 `left: 0; right: 0` 把浮层宽度**完全绑死在定位容器 .search 上**，而
+   .search 没有 min-width —— 它的地板就是 .search input 自己的左右内边距之和：
+   padding-left 30 + padding-right 32(--sp-8) + border 2 = **64px**。
+   于是窗口一窄（1024 = minWidth），输入框 64px、浮层也跟着 64px —— 而一行结果里
+   有姓名 / 拼音 / 称谓 / 家族页标签 / 年份五样东西，64px 里根本没法看
+   （实测 tests/topbar-layout.html：search=64px、searchMenu=64px）。
+
+   修法只给浮层加下限，**不给 .search 加 min-width** —— 那要从 .view-switch 再抢 56px，
+   而它有 overflow-x:auto 且滚动条被 scrollbar-width:none 藏掉，会变成
+   「页签无声无息少了一个」的老问题。搜索框被压扁后仍可点击，
+   展开的浮层才是真正可用的界面（标准 combobox 模式）。 */
+.search-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 60;
+  min-width: 280px;
+  max-height: 420px; overflow-y: auto;
+  background: var(--bg-surface); border: 1px solid var(--line-200);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-lg);
+  padding: var(--sp-2);
+}
+.search-menu[hidden] { display: none; }
+.sr-group {
+  display: flex; align-items: center; gap: var(--sp-1);
+  font-size: var(--fs-xs); color: var(--ink-400); letter-spacing: .06em;
+  padding: var(--sp-1) var(--sp-2);
+}
+/* 第二组（姻亲家族页）的分隔线 —— 纯静态标题，不再是可点的折叠按钮 */
+.sr-group.sr-sub {
+  border-top: 1px solid var(--line-100);
+  margin-top: var(--sp-2); padding-top: var(--sp-2);
+}
+.sr-list { display: flex; flex-direction: column; gap: 2px; }
+
+.sr-item {
+  display: flex; align-items: center; gap: var(--sp-2);
+  min-height: 32px; padding: 2px var(--sp-2); border-radius: var(--r-sm);
+  font-size: var(--fs-md); color: var(--ink-700); text-align: left;
+  transition: var(--t-fast); width: 100%;
+}
+.sr-item:hover { background: var(--bg-hover); color: var(--ink-900); }
+.sr-item.on { background: var(--primary-100); color: var(--primary-700); }
+.sr-name { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sr-call { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-400); font-size: var(--fs-sm); }
+.sr-item.on .sr-call { color: var(--primary-600); }
+/* 拼音命中时姓名右边那个拼音串 —— 比称谓还要弱一档：它只是「怎么搜到的」，
+   不是这个人的身份信息。高亮色留给选中态，别让它抢姓名的话。 */
+.sr-pinyin { flex: 0 0 auto; color: var(--ink-300); font-size: var(--fs-xs); letter-spacing: .2px; }
+.sr-item.on .sr-pinyin { color: var(--primary-500, var(--ink-400)); }
+/* 命中的那几字高亮 —— 一屏好几个「侄子」时，这一标就是认人的第一眼 */
+.sr-item mark { background: var(--warning-bg, #fff4e5); color: var(--primary-700); border-radius: 2px; padding: 0 1px; }
+.sr-spacer { flex: 1 1 auto; }
+.sr-scope { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--affinal); }
+.sr-year { flex: 0 0 auto; font-size: var(--fs-xs); color: var(--ink-400); font-family: var(--font-num); }
+.sr-empty {
+  padding: var(--sp-2) var(--sp-2); font-size: var(--fs-sm); color: var(--ink-400);
+}
+.sr-foot {
+  padding: var(--sp-2) var(--sp-2) var(--sp-1); font-size: var(--fs-xs); color: var(--ink-300);
+}
+/* 竖向导航轨的占位块：把「关于」一行推到底部。
+   ⚠️ 顶栏**不共用它** —— 顶栏靠 .btn-toggle 的 margin-left:auto 定位（见那里）。
+      两者曾共用 .spacer，导致顶栏那个把搜索框该得的空间对半分走（v0.2.77 修）。 */
+.rail-spacer { flex: 1; }
+
+/* ---------- 按钮体系 ---------- */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  height: 32px; padding: 0 var(--sp-3); border-radius: var(--r-md);
+  font-size: var(--fs-md); font-weight: var(--fw-medium);
+  border: 1px solid var(--line-200); background: var(--bg-surface); color: var(--ink-700);
+  transition: var(--t-fast); white-space: nowrap; user-select: none;
+}
+.btn:hover { background: var(--bg-hover); border-color: var(--line-300); }
+.btn:active { transform: translateY(.5px); }
+.btn svg { width: 14px; height: 14px; flex: 0 0 14px; }
+
+.btn-primary { background: var(--primary-600); border-color: var(--primary-600); color: #fff; box-shadow: var(--shadow-xs); }
+.btn-primary:hover { background: var(--primary-700); border-color: var(--primary-700); }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--ink-500); }
+.btn-ghost:hover { background: var(--bg-hover); color: var(--ink-700); }
+.btn-danger { color: var(--danger); border-color: #f3cfcf; background: var(--bg-surface); }
+.btn-danger:hover { background: var(--danger-bg); border-color: #e8b4b4; }
+.btn-sm { height: 26px; padding: 0 var(--sp-2); font-size: var(--fs-sm); border-radius: var(--r-sm); }
+/* ---------- 窄态降级：文字按钮只留图标（v0.2.76） ----------
+   状态由 app.js 的 ResizeObserver 打在 .topbar[data-narrow] 上。
+   ⚠️ 判据**不能**用 scrollWidth > clientWidth —— 顶栏永远不会横向溢出
+   （flex 把缺口吃进各项的宽度里，实测 scrollWidth 恒等于 clientWidth）。
+   也不能只看一个阈值：图标态省出的空间会把搜索框推回「够宽」，于是又还原成
+   文字态、再把它压窄 —— 来回翻转。所以用「搜索框可见文字宽」+ 双阈值滞回
+   （见 app.js 的 watchTopbarNarrow）。 */
+.topbar[data-narrow="true"] .btn-label { display: none; }
+/* 窄态下把宽度让给搜索框：.view-switch 封顶 260px —— 它是顶栏里唯一还
+   discretionary 的大块。
+   它的 flex 基准是自己的内容宽度（三个页签最长能要到 386px），而 .search
+   基准是 0、只分剩下的，于是「剩下的」永远填不满它 64px 的内边距地板
+   （实测 1024 与 1380 的可用文字宽分别是 −2 与 19，几乎不随窗口变）。
+   封顶后三个页签各约 86px —— 仍然**三个都在**（那是用户报的原始问题），
+   只是标签更短。⚠️ 只在窄态封顶：宽态下页签要显示完整标签。
+
+   原本这里还有一条「.spacer 窄态下不 grow」，v0.2.77 已删：那条规则只是权宜之计，
+   真正的做法是顶栏**根本不该有那个占位块**（见 .btn-toggle 的 margin-left:auto）。
+   搜索框该优先拿空间，而占位块在任何宽度下都会跟它对半分。 */
+.topbar[data-narrow="true"] .view-switch { max-width: 260px; }
+/* ③ 窄态下藏掉 ⌘K 提示、收窄输入框右内边距。
+     这 24px 不是从别处抢来的，是**本来就用不上的**：
+     .search input 的 padding-right 32px(--sp-8) 是给 right:8 的 ⌘K 角标留的位置，
+     而那个角标在输入框只有几十像素宽时纯属占地方（而且输入时它本来就会隐藏）。
+     收掉它，输入框的地板从 30+32+2=64 降到 30+8+2=40 ——
+     要「看得见自己打了什么」所需的宽度从 104 降到 80，比再削页签标签划算。 */
+.topbar[data-narrow="true"] .search kbd { display: none; }
+.topbar[data-narrow="true"] .search input { padding-right: 8px; }
+
+.btn-ico { display: inline-flex; align-items: center; justify-content: center; }
+.btn-ico svg { width: 14px; height: 14px; }
+.btn-ico svg text { font-family: var(--font-ui); }
+/* 「只显示姓名」的 Aa 字形图标**只在窄态出现** —— 宽态有文字就够了，
+   两个一起显示是重复信息。 */
+.btn-toggle .btn-ico { display: none; }
+.topbar[data-narrow="true"] .btn-toggle .btn-ico { display: inline-flex; }
+/* v0.2.79：窄态下这个图标给 17px，比常规的 14px 大一档。
+   理由是它此时**是按钮唯一的可辨识线索**（文字没了、旁边的小圆点只表状态不表用途），
+   而 14px 盒里的字形只有 9 格字高、屏幕上约 5.2px，比邻近图标小一半（见 icons.js）。
+   给到 17px（缩放 0.708）+ 加大字号后约 9.2px，与「添加成员」的加号同级。
+   flex: 0 0 17px —— 别让文字…（窄态下没有文字，但同一条规则也覆盖宽态的隐藏态，
+   写死 flex 可以保证图标不会被挤扁）。 */
+.topbar[data-narrow="true"] .btn-toggle .btn-ico svg { width: 17px; height: 17px; flex: 0 0 17px; }
+
+.btn-icon { width: 32px; padding: 0; }
+/* v0.2.76：顶栏里的图标按钮（适应窗口 / 回到当前视角）**不许缩**。
+   它们本来就是 `width: 32px` 的固定尺寸按钮，但作为 flex item 默认
+   `flex: 0 1 auto` 可收缩 —— 窗口窄下来时被压到 17~20px，图标跟着变形
+   （实测 tests/topbar-layout.html 最坏情况）。这跟 .brand 是同一类毛病：
+   「写死了尺寸」不等于「不会被 flex 压」。
+   作用域限定 .topbar —— 弹窗里的 .btn-icon（关闭按钮）不在 flex 行里，不该被牵连。 */
+.topbar .btn-icon { flex: 0 0 32px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+.btn:disabled:hover { background: var(--bg-surface); border-color: var(--line-200); }
+
+/* 「只显示姓名」开关（v0.2.54）
+   状态常驻可见：空心点 = 仍显示称谓（默认），实心高亮点 = 只看姓名。
+   不靠颜色单独承载信息 —— 文字与 aria-pressed 同时变化。 */
+/* 「只显示姓名」是顶栏右侧按钮组的第一个，用 margin-left:auto 把它之后的控件推到最右。
+
+   为什么不用一个占位块（原来那个 <div class="spacer">）—— flex 分配剩余空间时
+   「flex-grow 的项」和「auto 外边距」都会参与，两者按 grow 因子分，但 auto margin
+   只在**搜索框长满 max-width: 300px 之后**才有剩余可吸收：
+     · 空间紧张（≤ 约 1560px）→ 搜索框吃掉全部剩余 → 没有剩余 → auto margin 算出 0
+       → 右侧控件紧跟在搜索框后面，等价于靠右 ✓
+     · 超宽 → 搜索框封顶 300px → 剩下的由 auto margin 吸收 → 控件贴右边 ✓
+   而占位块是 flex:1，会在**任何**宽度下先跟搜索框对半分。实测（1380 宽、真实长度
+   的页签标签）分到 82px，减去输入框 62px 的左右内边距，文字区只剩 16px —— 宽窗口
+   下看不见自己打了什么，比窄态（52px）还糟。 */
+.btn-toggle { gap: var(--sp-1); font-size: var(--fs-sm); margin-left: auto; }
+.toggle-dot {
+  width: 8px; height: 8px; flex: 0 0 8px; border-radius: var(--r-full);
+  border: 1.5px solid var(--ink-300); background: transparent;
+}
+.btn-toggle.on { background: var(--primary-100); color: var(--primary-700); }
+.btn-toggle.on:hover { background: var(--primary-100); color: var(--primary-700); }
+.btn-toggle.on .toggle-dot { background: var(--primary-600); border-color: var(--primary-600); }
+
+/* 缩放控件 */
+.zoom { display: flex; align-items: center; border: 1px solid var(--line-200); border-radius: var(--r-md); overflow: hidden; background: var(--bg-surface); }
+.zoom button { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; color: var(--ink-500); transition: var(--t-fast); font-size: 15px; line-height: 1; }
+.zoom button:hover { background: var(--bg-hover); color: var(--ink-900); }
+.zoom-val {
+  min-width: 46px; text-align: center; font-size: var(--fs-sm); color: var(--ink-500);
+  font-family: var(--font-num);
+  border-left: 1px solid var(--line-100); border-right: 1px solid var(--line-100);
+  height: 30px; display: flex; align-items: center; justify-content: center;
+}
+
+/* =========================================================
+   主体三栏
+   ========================================================= */
+.body { flex: 1; display: flex; min-height: 0; position: relative; }
+
+/* ---------- 左导航轨 ---------- */
+.rail {
+  width: var(--rail-w); flex: 0 0 var(--rail-w);
+  background: var(--bg-surface); border-right: 1px solid var(--line-200);
+  display: flex; flex-direction: column; align-items: center;
+  padding: var(--sp-3) 0; gap: var(--sp-2); z-index: 15;
+}
+.rail-btn {
+  width: 36px; height: 36px; border-radius: var(--r-md);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-400); transition: var(--t-fast); position: relative;
+}
+.rail-btn svg { width: 18px; height: 18px; }
+.rail-btn:hover { background: var(--bg-hover); color: var(--ink-700); }
+.rail-btn.on { background: var(--primary-100); color: var(--primary-600); }
+.rail-btn.on::before {
+  content: ''; position: absolute; left: -12px; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 16px; border-radius: 0 3px 3px 0; background: var(--primary-600);
+}
+/* 体检有问题的红点 */
+.rail-btn .rail-dot {
+  position: absolute; top: 5px; right: 5px;
+  min-width: 15px; height: 15px; padding: 0 3px; border-radius: var(--r-full);
+  background: var(--danger); color: #fff; font-size: 9px; font-weight: var(--fw-semibold);
+  display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--bg-surface);
+}
+.rail-btn .rail-dot.ok { background: var(--success); }
+.rail-tip {
+  position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
+  background: var(--ink-900); color: #fff; font-size: var(--fs-sm);
+  padding: 5px var(--sp-3); border-radius: var(--r-sm); white-space: nowrap;
+  opacity: 0; pointer-events: none; transition: var(--t-fast); z-index: 60;
+  box-shadow: var(--shadow-md);
+}
+.rail-btn:hover .rail-tip { opacity: 1; }
+.rail-sep { width: 20px; height: 1px; background: var(--line-100); margin: var(--sp-1) 0; }
+
+/* ---------- 视图容器 ---------- */
+.view { display: none; flex: 1; min-height: 0; }
+.view.on { display: flex; }
+
+/* ---------- 画布 ---------- */
+.stage { flex: 1; position: relative; overflow: hidden; min-width: 0; user-select: none; -webkit-user-select: none; }
+.stage-bg {
+  position: absolute; inset: 0;
+  background-image: radial-gradient(circle, #dde3ec 1px, transparent 1px);
+  background-size: 22px 22px;
+  cursor: grab;
+}
+.stage-bg.grabbing { cursor: grabbing; }
+.canvas { position: absolute; top: 0; left: 0; transform-origin: 0 0; transition: transform var(--t-fast); }
+.wires { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+
+/* ---------- 血缘卡片（节点） ---------- */
+.node {
+  position: absolute; width: var(--node-w);
+  display: flex; flex-direction: column; align-items: center; gap: var(--sp-1);
+  padding: var(--sp-1); border-radius: var(--r-lg);
+  cursor: pointer; transition: background var(--t-fast);
+}
+.node:hover { background: rgba(255, 255, 255, .92); }
+.avatar {
+  width: 60px; height: 60px; border-radius: var(--r-full);
+  background: var(--bg-surface);
+  border: 2px solid var(--line-300);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 20px; font-weight: var(--fw-medium); color: var(--ink-400);
+  box-shadow: var(--shadow-sm);
+  transition: var(--t-base); position: relative;
+}
+/* 不在 .avatar 上用 overflow:hidden，否则会裁掉右上「故」/右下展开箭头等角标；
+   头像图片的圆形裁切改由 img 自身的 border-radius 负责 */
+.avatar img { width: 100%; height: 100%; object-fit: cover; border-radius: var(--r-full); }
+.node:hover .avatar { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.node.sel .avatar { box-shadow: 0 0 0 3px rgba(59, 110, 245, .28), var(--shadow-md); }
+
+/* 亲缘色 */
+.node.paternal .avatar { border-color: var(--paternal); color: var(--paternal); background: var(--paternal-bg); }
+.node.maternal .avatar { border-color: var(--maternal); color: var(--maternal); background: var(--maternal-bg); }
+.node.affinal  .avatar { border-color: var(--affinal);  color: var(--affinal);  background: var(--affinal-bg); }
+.node.deceased .avatar { border-color: var(--deceased); color: var(--deceased); background: var(--deceased-bg); }
+
+/* 已故标记 */
+.tag-dead {
+  position: absolute; top: -3px; right: -3px;
+  width: 16px; height: 16px; border-radius: var(--r-full);
+  background: var(--deceased); color: #fff;
+  font-size: 9px; display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--bg-surface);
+}
+/* 可展开角标 */
+.tag-expand {
+  position: absolute; bottom: -2px; right: -2px;
+  width: 20px; height: 20px; border-radius: var(--r-full);
+  background: var(--affinal); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid var(--bg-surface);
+  box-shadow: var(--shadow-sm); transition: var(--t-fast); font-size: 10px;
+}
+.tag-expand svg { width: 10px; height: 10px; transition: var(--t-base); }
+.node:hover .tag-expand { transform: scale(1.12); }
+.tag-expand.on { background: var(--ink-400); }
+.tag-expand.on svg { transform: rotate(180deg); }
+
+/* 信息待补角标（姓名 / 性别留空） */
+.tag-todo {
+  position: absolute; top: -5px; left: -5px;
+  font-size: 9px; line-height: 1; padding: 2px 4px;
+  border-radius: var(--r-full);
+  background: var(--warning); color: #fff;
+  border: 1.5px solid var(--bg-surface);
+  font-weight: var(--fw-medium); white-space: nowrap;
+}
+
+.node-call {
+  font-size: var(--fs-md); font-weight: var(--fw-semibold);
+  color: var(--ink-900); line-height: var(--lh-tight); letter-spacing: .01em;
+  text-align: center;
+}
+.node-name { font-size: var(--fs-xs); color: var(--ink-400); line-height: var(--lh-tight); }
+/* 「只显示姓名」：大字位写的是姓名，不再是称谓 —— 沿用大字的重量，
+   但颜色回到正文色，避免「看起来像在报称谓」。 */
+.node-call-name { color: var(--ink-900); font-size: var(--fs-sm); }
+.node.sel .node-call-name { color: var(--primary-600); }
+.node.deceased .node-call-name { color: var(--ink-500); }
+.node.sel .node-call { color: var(--primary-600); }
+.node.deceased .node-call { color: var(--ink-500); }
+.node.deceased .node-name { color: var(--ink-300); }
+/* 称谓未覆盖 —— 用虚线提示「待确认」 */
+.node-call.unknown { color: var(--affinal); font-weight: var(--fw-medium); }
+
+/* 锚点（本人）常驻标记 */
+.node.anchor .avatar { box-shadow: 0 0 0 3px rgba(44, 95, 224, .3), var(--shadow-md); }
+.anchor-flag {
+  position: absolute; top: -20px; left: 50%; transform: translateX(-50%);
+  font-size: 10px; font-weight: var(--fw-medium); color: var(--primary-600);
+  background: var(--primary-100); border-radius: var(--r-full);
+  padding: 1px var(--sp-2); white-space: nowrap;
+}
+
+/* ---------- 画布浮层：图例 ---------- */
+.legend {
+  position: absolute; left: var(--sp-4); bottom: var(--sp-4);
+  background: rgba(255, 255, 255, .94); backdrop-filter: blur(8px);
+  border: 1px solid var(--line-200); border-radius: var(--r-lg);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex; flex-direction: column; gap: 7px;
+  box-shadow: var(--shadow-sm); font-size: var(--fs-sm); color: var(--ink-500);
+  z-index: 5;
+}
+.legend-row { display: flex; align-items: center; gap: var(--sp-2); }
+.dot { width: 9px; height: 9px; border-radius: var(--r-full); flex: 0 0 9px; }
+.legend hr { border: 0; border-top: 1px solid var(--line-100); margin: var(--sp-1) 0; }
+.ln { width: 20px; height: 0; border-top: 2px solid var(--wire-blood); flex: 0 0 20px; }
+.ln.marry { border-top-color: var(--wire-marry); }
+
+/* ---------- 画布浮层：视角提示条 ---------- */
+.scope-bar {
+  position: absolute; top: var(--sp-4); left: 50%; transform: translate(-50%, -10px);
+  background: var(--affinal-bg); border: 1px solid #e8d3b4; color: var(--affinal-deep);
+  padding: var(--sp-2) var(--sp-4); border-radius: var(--r-full);
+  font-size: var(--fs-sm); box-shadow: var(--shadow-sm);
+  display: flex; align-items: center; gap: var(--sp-2);
+  opacity: 0; transition: var(--t-base); pointer-events: none; white-space: nowrap;
+  z-index: 5;
+}
+.scope-bar.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+.scope-bar b { font-weight: var(--fw-semibold); }
+/* 顶部「当前查看 ×× 家族」胶囊里的 info 图标（app.js）。同 v0.2.73：
+   此处原本也没有 svg 尺寸规则，切到姻亲家族页时图标撑破胶囊。
+   .scope-bar 已是 flex + align-items:center，无需 vertical-align。 */
+.scope-bar svg { width: 14px; height: 14px; flex: 0 0 14px; }
+
+/* ---------- 画布浮层：缩放 ---------- */
+.zoom-dock {
+  position: absolute; right: var(--sp-4); bottom: var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-2); align-items: flex-end;
+  z-index: 5;
+}
+.fab {
+  width: 36px; height: 36px; border-radius: var(--r-md);
+  background: var(--bg-surface); border: 1px solid var(--line-200);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-500); box-shadow: var(--shadow-sm); transition: var(--t-fast);
+}
+.fab svg { width: 16px; height: 16px; }
+.fab:hover { background: var(--bg-hover); color: var(--ink-900); box-shadow: var(--shadow-md); }
+
+/* =========================================================
+   右详情面板
+   ========================================================= */
+.panel {
+  width: var(--panel-w); flex: 0 0 var(--panel-w);
+  background: var(--bg-surface); border-left: 1px solid var(--line-200);
+  display: flex; flex-direction: column; overflow: hidden;
+  transition: flex-basis var(--t-base), width var(--t-base);
+  z-index: 15;
+}
+.panel.hide { flex-basis: 0; width: 0; border-left: 0; }
+
+.panel-handle {
+  position: absolute; top: 50%; right: var(--panel-w); transform: translateY(-50%);
+  width: 24px; height: 56px; border-radius: var(--r-md) 0 0 var(--r-md);
+  background: var(--bg-surface); border: 1px solid var(--line-200); border-right: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; color: var(--ink-400); z-index: 16;
+  transition: right var(--t-base), background var(--t-fast), color var(--t-fast);
+  box-shadow: -2px 0 8px rgba(15, 20, 25, .05);
+}
+.panel-handle:hover { background: var(--bg-hover); color: var(--ink-700); }
+.panel-handle.collapsed { right: 0; }
+.panel-handle svg { width: 12px; height: 12px; transition: transform var(--t-base); }
+.panel-handle.collapsed svg { transform: rotate(180deg); }
+.panel-handle span { font-size: 10px; writing-mode: vertical-rl; letter-spacing: .08em; }
+
+.panel-head { padding: var(--sp-5) var(--sp-5) var(--sp-4); border-bottom: 1px solid var(--line-100); }
+.panel-head-top { display: flex; align-items: flex-start; gap: var(--sp-4); }
+.panel-avatar {
+  width: 64px; height: 64px; flex: 0 0 64px; border-radius: var(--r-full);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 24px; font-weight: var(--fw-medium);
+  border: 2px solid var(--paternal); color: var(--paternal); background: var(--paternal-bg);
+  overflow: hidden;
+}
+.panel-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.panel-id { min-width: 0; flex: 1; }
+
+/* 称谓三级显示：本地叫法（主）→ 标准称呼 → 关系描述 */
+.call-main { font-size: var(--fs-3xl); font-weight: var(--fw-bold); color: var(--ink-900); line-height: var(--lh-tight); letter-spacing: .01em; }
+.call-main.unknown { font-size: var(--fs-lg); color: var(--affinal); font-weight: var(--fw-semibold); }
+/* 「只显示姓名」：大字位是姓名 —— 比称谓小一号，别让人误会那是称呼 */
+.call-main-name { font-size: var(--fs-2xl); }
+.call-std { font-size: var(--fs-sm); color: var(--ink-500); margin-top: 3px; }
+.call-std b { font-weight: var(--fw-medium); color: var(--ink-700); }
+.call-path {
+  font-size: var(--fs-xs); color: var(--ink-400); margin-top: var(--sp-2);
+  background: var(--bg-sunken); border-radius: var(--r-sm);
+  padding: 3px var(--sp-2); display: inline-block; line-height: 1.5;
+}
+.name-line { font-size: var(--fs-lg); color: var(--ink-700); margin-top: var(--sp-2); font-weight: var(--fw-medium); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-3); }
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--fs-xs); font-weight: var(--fw-medium);
+  padding: 2px var(--sp-2); border-radius: var(--r-full);
+}
+.chip-paternal { background: var(--paternal-bg); color: var(--paternal-deep); }
+.chip-maternal { background: var(--maternal-bg); color: var(--maternal-deep); }
+.chip-affinal  { background: var(--affinal-bg);  color: var(--affinal-deep); }
+.chip-deceased { background: var(--deceased-bg); color: var(--deceased-deep); }
+.chip-alive    { background: var(--success-bg);  color: var(--success); }
+.chip-privacy  { background: var(--bg-sunken);   color: var(--ink-500); }
+.chip-todo     { background: var(--warning-bg);  color: var(--warning); font-weight: var(--fw-medium); }
+
+/* 详情「基本资料」里性别待补的内联标记 */
+.pend { color: var(--warning); font-weight: var(--fw-medium); }
+
+.panel-body { flex: 1; overflow-y: auto; padding: var(--sp-4) var(--sp-5) var(--sp-6); }
+.panel-body::-webkit-scrollbar { width: 8px; }
+.panel-body::-webkit-scrollbar-thumb { background: var(--line-300); border-radius: var(--r-full); border: 2px solid var(--bg-surface); }
+
+.sec-title {
+  font-size: var(--fs-xs); font-weight: var(--fw-semibold); color: var(--ink-400);
+  letter-spacing: .08em; margin: var(--sp-5) 0 var(--sp-3);
+  display: flex; align-items: center; gap: var(--sp-2);
+}
+.sec-title:first-child { margin-top: 0; }
+.sec-title::after { content: ''; flex: 1; height: 1px; background: var(--line-100); }
+
+.field { display: flex; padding: 9px 0; font-size: var(--fs-md); border-bottom: 1px solid var(--line-100); }
+.field:last-child { border-bottom: 0; }
+.field .k { color: var(--ink-400); width: 68px; flex: 0 0 68px; }
+.field .v { color: var(--ink-900); flex: 1; min-width: 0; word-break: break-word; }
+.field .v a { color: var(--primary-600); text-decoration: none; cursor: pointer; }
+.field .v a:hover { text-decoration: underline; }
+.muted { color: var(--ink-300); }
+
+/* 详情面板里的「补充」入口：空字段不再是死文字，点了直接去补 */
+.fill-btn {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 1px 10px; margin: 0; border-radius: var(--r-md);
+  border: 1px dashed var(--line-300); background: transparent;
+  color: var(--primary-600); font-size: var(--fs-sm);
+  font-family: inherit; line-height: 1.7; cursor: pointer;
+  transition: var(--t-fast);
+}
+.fill-btn:hover { background: var(--primary-100); border-color: var(--primary-600); color: var(--primary-700); }
+.fill-btn:active { transform: translateY(.5px); }
+.fill-btn:focus-visible { outline: 2px solid var(--primary-500); outline-offset: 1px; }
+
+/* 关系链可视化 —— 本产品的灵魂视图 */
+.rel-chain { background: var(--bg-sunken); border-radius: var(--r-lg); padding: var(--sp-4); font-size: var(--fs-md); }
+.rel-chain-row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; line-height: 2; }
+.rel-node {
+  background: var(--bg-surface); border: 1px solid var(--line-200);
+  border-radius: var(--r-sm); padding: 2px var(--sp-2);
+  font-size: var(--fs-sm); color: var(--ink-700); white-space: nowrap;
+}
+.rel-node.me { background: var(--primary-100); border-color: #c5d4fb; color: var(--primary-700); font-weight: var(--fw-semibold); }
+.rel-node.step { background: var(--bg-surface); border-color: var(--line-300); color: var(--ink-500); }
+.rel-node.target { background: var(--paternal-bg); border-color: #c9dcfa; color: var(--paternal-deep); font-weight: var(--fw-semibold); }
+.rel-node.target.maternal { background: var(--maternal-bg); border-color: #f2c4dc; color: var(--maternal-deep); }
+.rel-node.target.affinal  { background: var(--affinal-bg);  border-color: #e8d3b4; color: var(--affinal-deep); }
+.rel-arrow { color: var(--ink-300); font-size: var(--fs-sm); }
+.rel-basis { font-size: var(--fs-sm); color: var(--ink-400); margin-top: var(--sp-2); line-height: 1.7; }
+.rel-basis b { color: var(--ink-700); font-weight: var(--fw-medium); }
+/* 告警行（长幼判不出来 / 辈分与规则表不一致，ui/panel.js）—— v0.2.74 改成 flex 行。
+   为什么不是「一个普通段落 + 行内 svg」：行内 svg 只能靠 vertical-align 去「挪」，
+   那是个经验值（此前是 -3px），字号一变就得重调，而且这两行文字会折行，
+   折行后图标该对第一行还是对整块更说不清。
+   改用 flex（抄 .err-msg 的写法）后，图标与文字的关系由布局保证：
+     · flex: 0 0 14px  → 图标不会被文字压扁，取 14px 与 .reveal svg /
+       .vp-cur svg / .check-pass svg 同档；
+     · align-items: flex-start + margin-top → 折行时仍贴第一行文字的上沿，
+       margin-top 把 14px 图标在 20.4px 行框（12px 字号 × line-height 1.7）里
+       摆到视觉居中。
+   颜色从 panel.js 的内联 style 挪到这里，告警态不必再靠行内样式表达。
+   选择器写成 .rel-basis.rel-warn（0,2,0）而不是单靠 .rel-warn 压 .rel-basis 的
+   color（那两者都 0,1,0，得靠源码顺序决胜 —— 与本文件里 :where() 兜底刻意规避的
+   是同一类脆弱性）。 */
+.rel-basis.rel-warn { display: flex; align-items: flex-start; gap: var(--sp-1); color: var(--affinal-deep); }
+.rel-warn svg { flex: 0 0 14px; width: 14px; height: 14px; margin-top: 3px; }
+
+/* 照片 */
+.photos { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); }
+.photo {
+  aspect-ratio: 1; border-radius: var(--r-md); background: var(--bg-sunken);
+  border: 1px solid var(--line-200);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-300); transition: var(--t-fast); overflow: hidden;
+}
+.photo img { width: 100%; height: 100%; object-fit: cover; }
+.photo svg { width: 16px; height: 16px; }
+.photo:hover { background: var(--bg-hover); color: var(--ink-500); }
+.photo.add { border-style: dashed; }
+.photo.empty { background: repeating-linear-gradient(45deg, var(--bg-sunken), var(--bg-sunken) 6px, #e7ebf1 6px, #e7ebf1 12px); }
+
+/* 面板底部操作 */
+.panel-foot {
+  padding: var(--sp-3) var(--sp-5) var(--sp-5);
+  border-top: 1px solid var(--line-100);
+  display: flex; gap: var(--sp-2); background: var(--bg-surface);
+}
+.panel-foot .btn { flex: 1; }
+
+/* 面板内展开家族按钮 */
+.reveal {
+  margin: 0 var(--sp-5) var(--sp-2);
+  height: 38px; border-radius: var(--r-md);
+  border: 1px dashed #e3cca8; background: var(--affinal-bg); color: var(--affinal-deep);
+  font-size: var(--fs-md); font-weight: var(--fw-medium);
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  transition: var(--t-fast);
+}
+.reveal:hover { background: #f8e9d4; border-color: var(--affinal); }
+.reveal svg { width: 14px; height: 14px; }
+
+/* 面板内「设为我的视角」：沿用 .reveal 的虚线语言（虚线 = 扩展性操作，
+   点了会改变全局状态），只把色系换成 primary 跟「展开原生家族」的米黄区分开。 */
+.vp-set { border-color: #c5d4fb; background: var(--primary-100); color: var(--primary-700); }
+.vp-set:hover { background: #dde6fd; border-color: var(--primary-600); }
+.vp-set:active { transform: translateY(.5px); }
+
+/* 已经是当前视角：退化成状态指示条，不再是能点的东西 */
+.vp-cur {
+  margin: 0 var(--sp-5) var(--sp-2);
+  height: 38px; border-radius: var(--r-md);
+  background: var(--primary-100); color: var(--primary-700);
+  font-size: var(--fs-md); font-weight: var(--fw-medium);
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-2);
+  cursor: default;
+}
+.vp-cur svg { width: 14px; height: 14px; }
+
+/* 面板空状态 */
+.panel-empty {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: var(--sp-3);
+  color: var(--ink-400); font-size: var(--fs-md); padding: var(--sp-8); text-align: center;
+}
+.panel-empty svg { width: 40px; height: 40px; color: var(--line-300); }
+
+/* =========================================================
+   体检面板（F8）
+   ========================================================= */
+.check-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; background: var(--bg-app); }
+.check-head {
+  padding: var(--sp-4) var(--sp-5); background: var(--bg-surface);
+  border-bottom: 1px solid var(--line-200);
+  display: flex; align-items: center; gap: var(--sp-3);
+}
+.check-title { font-size: var(--fs-lg); font-weight: var(--fw-semibold); color: var(--ink-900); }
+.check-score {
+  margin-left: auto; display: flex; align-items: baseline; gap: var(--sp-2);
+  font-size: var(--fs-sm); color: var(--ink-500);
+}
+.check-score b { font-size: var(--fs-xl); font-weight: var(--fw-bold); font-family: var(--font-num); }
+.check-score b.pass { color: var(--success); }
+.check-score b.fail { color: var(--danger); }
+.check-body { flex: 1; overflow-y: auto; padding: var(--sp-5); }
+.check-group {
+  background: var(--bg-surface); border: 1px solid var(--line-200);
+  border-radius: var(--r-lg); margin-bottom: var(--sp-3); overflow: hidden;
+}
+.check-group-head {
+  padding: var(--sp-3) var(--sp-4); display: flex; align-items: center; gap: var(--sp-3);
+  font-size: var(--fs-md); font-weight: var(--fw-medium); color: var(--ink-700);
+  border-bottom: 1px solid var(--line-100);
+}
+.check-group-head .code { font-family: var(--font-num); font-size: var(--fs-xs); color: var(--ink-400); }
+.check-group-head .badge {
+  margin-left: auto; font-size: var(--fs-xs); font-weight: var(--fw-semibold);
+  padding: 2px var(--sp-2); border-radius: var(--r-full);
+}
+.badge.ok   { background: var(--success-bg); color: var(--success); }
+.badge.warn { background: var(--danger-bg);  color: var(--danger); }
+.badge.info { background: var(--warning-bg); color: var(--warning); }
+/* 待补充信息：用提醒色而非错误色，强调「之后要补」而非「错了」 */
+.check-group.todo .check-item::before { content: '!'; color: var(--warning); }
+.check-group-body { padding: var(--sp-2) var(--sp-4) var(--sp-3); }
+.check-item {
+  display: flex; align-items: flex-start; gap: var(--sp-2);
+  padding: var(--sp-2) 0; font-size: var(--fs-md); color: var(--ink-700);
+  border-bottom: 1px solid var(--line-100);
+}
+.check-item:last-child { border-bottom: 0; }
+.check-item::before { content: '·'; color: var(--danger); font-weight: var(--fw-bold); line-height: 1.6; }
+.check-item .who { color: var(--primary-600); cursor: pointer; }
+.check-item .who:hover { text-decoration: underline; }
+.check-pass { padding: var(--sp-3) var(--sp-4) var(--sp-3); font-size: var(--fs-md); color: var(--success); display: flex; align-items: center; gap: var(--sp-2); }
+.check-pass svg { width: 14px; height: 14px; flex: 0 0 14px; }
+
+/* =========================================================
+   弹窗：录入 / 编辑
+   ========================================================= */
+.overlay {
+  position: fixed; inset: 0; background: rgba(15, 20, 25, .42);
+  backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100; opacity: 0; pointer-events: none; transition: opacity var(--t-base);
+}
+.overlay.on { opacity: 1; pointer-events: auto; }
+
+/* 导出图片时的遮罩（v0.2.63）。
+   层级刻意压到 overlay 之下：导出时不该有弹窗开着，万一有，
+   别让这块灰布盖在对话框上。 */
+.export-busy {
+  position: fixed; inset: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, .6);
+  color: var(--ink-500); font-size: var(--fs-sm);
+}
+.modal {
+  width: min(560px, calc(100vw - 32px)); max-height: 86vh; background: var(--bg-surface);
+  border-radius: var(--r-xl); box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column; overflow: hidden;
+  transform: scale(.97) translateY(8px); transition: transform var(--t-base);
+}
+.overlay.on .modal { transform: scale(1) translateY(0); }
+/* 表单是 modal 的直接子元素，必须继承纵向 flex + 允许收缩，
+   否则 modal-body 的 overflow-y:auto 永远不生效 ——
+   内容超高时被 .modal 的 overflow:hidden 直接裁掉（编辑界面展示不全）。 */
+.modal > form {
+  display: flex; flex-direction: column;
+  flex: 1 1 auto; min-height: 0;
+}
+.modal-head {
+  padding: var(--sp-5) var(--sp-6); border-bottom: 1px solid var(--line-100);
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+.modal-title { font-size: var(--fs-xl); font-weight: var(--fw-semibold); color: var(--ink-900); }
+.modal-sub { font-size: var(--fs-sm); color: var(--ink-400); margin-top: 2px; }
+.modal-body { padding: var(--sp-5) var(--sp-6); overflow-y: auto; flex: 1; min-height: 0; }
+.modal-foot {
+  padding: var(--sp-4) var(--sp-6); border-top: 1px solid var(--line-100);
+  display: flex; justify-content: flex-end; gap: var(--sp-3); background: var(--bg-app);
+  align-items: center; flex-shrink: 0;
+}
+.modal-foot .danger-zone { margin-right: auto; }
+
+/* ---------- 确认框叠层 ----------
+ * 替代原生 confirm()：原生模态框关闭后会破坏真实键盘输入（见 ui/dialog.js
+ * confirmOverlay 的注释）。这一层叠在当前弹窗之上，所以「在编辑弹窗里
+ * 问要不要删人」这种嵌套流程能正常工作。 */
+.confirm-layer {
+  position: absolute; inset: 0; z-index: 3;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: auto;
+}
+.confirm-text {
+  margin: 0; font-size: var(--fs-md); line-height: 1.85;
+  color: var(--ink-700); white-space: pre-wrap;
+}
+
+.form-row { display: flex; gap: var(--sp-4); margin-bottom: var(--sp-4); }
+.form-row:last-child { margin-bottom: 0; }
+.form-item { flex: 1; min-width: 0; }
+.form-item.full { flex: 1 0 100%; }
+
+/* 已确定的父母：静态文字而不是下拉 —— 从「添加亲属 → 子女」进来时，
+   父母本来就已经算好了，再摆个下拉等于让用户白选一遍。 */
+.locked-parent {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 10px; min-height: 34px;
+  border: 1px dashed var(--line-300); border-radius: var(--r-sm);
+  background: var(--bg-subtle, transparent);
+  font-size: var(--fs-sm); color: var(--ink-500, var(--ink-400));
+}
+.locked-parent b { color: var(--ink-900); font-weight: var(--fw-medium); }
+.form-label {
+  display: block; font-size: var(--fs-sm); font-weight: var(--fw-medium);
+  color: var(--ink-700); margin-bottom: var(--sp-2);
+}
+.form-label .req { color: var(--danger); margin-left: 2px; }
+.form-label .hint { font-size: var(--fs-xs); color: var(--ink-400); font-weight: var(--fw-regular); margin-left: var(--sp-2); }
+
+.input, .select {
+  width: 100%; height: 34px; border-radius: var(--r-md);
+  border: 1px solid var(--line-200); background: var(--bg-surface);
+  padding: 0 var(--sp-3); font-size: var(--fs-md); color: var(--ink-900);
+  transition: var(--t-fast);
+}
+.input::placeholder { color: var(--ink-300); }
+.input:hover, .select:hover { border-color: var(--line-300); }
+.input:focus, .select:focus { border-color: var(--primary-500); box-shadow: var(--shadow-focus); }
+.input.err { border-color: var(--danger); box-shadow: 0 0 0 3px rgba(209, 59, 59, .14); }
+.err-msg { font-size: var(--fs-xs); color: var(--danger); margin-top: var(--sp-1); display: flex; align-items: center; gap: 4px; }
+.err-msg svg { width: 11px; height: 11px; }
+.select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237c8794' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  padding-right: 32px; cursor: pointer;
+}
+select:disabled, .input:disabled { background: var(--bg-sunken); color: var(--ink-400); cursor: not-allowed; }
+
+/* 父母候选的分组标题（2026-10-11）
+   ⚠️ Windows 上原生 select 弹出的列表几乎不吃样式，optgroup 只有
+   label 文字能改颜色。所以只做两件最稳的事：把分组标题调成弱一档的
+   墨色、加一点上边距拉开距离 —— 靠这两点让「本家 / 配偶家」分得开。
+   真要更强的视觉分隔，得把 select 换成自绘下拉，那是另一件事。 */
+.select optgroup {
+  color: var(--ink-400);
+  font-size: var(--fs-xs);
+  font-style: normal;
+}
+.select optgroup > option { color: var(--ink-900); font-size: var(--fs-md); }
+
+/* 分段选择器 */
+.segmented { display: flex; background: var(--bg-sunken); border-radius: var(--r-md); padding: 3px; gap: 2px; }
+.segmented button {
+  flex: 1; height: 28px; border-radius: var(--r-sm);
+  font-size: var(--fs-md); color: var(--ink-500); transition: var(--t-fast);
+  display: flex; align-items: center; justify-content: center; gap: var(--sp-1);
+  white-space: nowrap;
+}
+.segmented button:hover { color: var(--ink-700); }
+.segmented button.on { background: var(--bg-surface); color: var(--primary-600); font-weight: var(--fw-semibold); box-shadow: var(--shadow-xs); }
+
+/* 开关 */
+.switch { display: inline-flex; align-items: center; gap: var(--sp-3); cursor: pointer; }
+.switch-track {
+  width: 38px; height: 22px; border-radius: var(--r-full);
+  background: var(--line-300); position: relative; transition: var(--t-base); flex: 0 0 38px;
+}
+.switch-thumb {
+  position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: var(--r-full);
+  background: #fff; box-shadow: var(--shadow-xs); transition: var(--t-base);
+}
+.switch.on .switch-track { background: var(--primary-600); }
+.switch.on .switch-thumb { transform: translateX(16px); }
+.switch-text { font-size: var(--fs-md); color: var(--ink-700); }
+
+/* 表单分组 */
+.form-block {
+  border: 1px solid var(--line-100); border-radius: var(--r-lg);
+  padding: var(--sp-4); margin-bottom: var(--sp-4); background: var(--bg-app);
+}
+.form-block-title {
+  font-size: var(--fs-sm); font-weight: var(--fw-semibold); color: var(--ink-700);
+  margin-bottom: var(--sp-3); display: flex; align-items: center; gap: var(--sp-2);
+}
+.form-block-title .num {
+  width: 18px; height: 18px; border-radius: var(--r-full);
+  background: var(--primary-600); color: #fff; font-size: 10px;
+  display: flex; align-items: center; justify-content: center; font-weight: var(--fw-semibold);
+}
+
+/* =========================================================
+   Toast 轻提示
+   ========================================================= */
+.toast-wrap {
+  position: fixed; bottom: var(--sp-6); left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: var(--sp-2); align-items: center;
+  z-index: 200; pointer-events: none;
+}
+.toast {
+  background: var(--ink-900); color: #fff; font-size: var(--fs-md);
+  padding: var(--sp-3) var(--sp-5); border-radius: var(--r-md);
+  box-shadow: var(--shadow-lg); display: flex; align-items: center; gap: var(--sp-2);
+  animation: toast-in var(--t-base) both;
+}
+.toast.warn { background: var(--danger); }
+.toast.ok { background: var(--success); }
+.toast svg { width: 14px; height: 14px; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* =========================================================
+   空状态（整个画布无数据）
+   ========================================================= */
+.stage-empty {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: var(--sp-4);
+  color: var(--ink-400); text-align: center; pointer-events: none;
+}
+.stage-empty svg { width: 56px; height: 56px; color: var(--line-300); }
+.stage-empty h3 { font-size: var(--fs-xl); font-weight: var(--fw-semibold); color: var(--ink-700); }
+.stage-empty p { font-size: var(--fs-md); max-width: 360px; line-height: var(--lh-loose); }
+
+/* =========================================================
+   小号弹窗 / 关系选择器
+   ========================================================= */
+.modal-sm { width: 420px; }
+
+.rel-picker { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-2); }
+.rel-pick {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: var(--sp-3) var(--sp-4); border-radius: var(--r-md);
+  border: 1px solid var(--line-200); background: var(--bg-surface);
+  text-align: left; transition: var(--t-fast); width: 100%;
+}
+.rel-pick:hover { border-color: var(--primary-500); background: var(--primary-100); }
+.rel-pick b { font-size: var(--fs-md); font-weight: var(--fw-semibold); color: var(--ink-900); }
+.rel-pick em { font-size: var(--fs-xs); color: var(--ink-400); font-style: normal; }
+/* 「新建谱」弹窗里的单选卡片需要选中态：光靠 hover 看不出当前选了哪个 */
+.rel-pick.on {
+  border-color: var(--primary-600); background: var(--primary-100);
+  box-shadow: var(--shadow-focus);
+}
+.rel-pick.on b { color: var(--primary-700); }
+
+/* =========================================================
+   体检视图里的说明段落
+   ========================================================= */
+.check-body p { margin: 0 0 var(--sp-2); }
+.check-group .sec-title { margin: var(--sp-4) var(--sp-4) var(--sp-2); }
+.check-group .field { padding: 7px var(--sp-4); }

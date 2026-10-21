@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>顶栏窄宽布局回归 · topbar-layout</title>
+<style>
+  body { margin: 0; font-family: monospace; }
+  /* 视口宽度 = electron/main.js 的 minWidth = 用户能拖到的最窄。
+     注意：不能并进 icon-size.html —— 那个 harness 的 iframe 是 1380，
+     两个套件需要不同的视口宽度，而一个 harness 只有一个固定宽度的 iframe。 */
+  iframe { border: 0; width: 1024px; height: 800px; position: absolute; left: -99999px; top: 0; }
+  pre { padding: 8px 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+<!--
+  顶栏窄宽布局回归（v0.2.76 新增）
+
+  【为什么要有这个套件】
+    修的问题是：窗口拖到最窄时，左上角品牌区会**逐字折行、纵向逃出 52px 的顶栏**，
+    盖住画布上的一整条横带。根因不是「宽度不够」，是**收缩优先级排错了** ——
+    中文可逐字断行 → .brand-text 的 min-content 约等于一个字宽 → 它成了顶栏里
+    第三容易被牺牲的项，而换行是唯一会纵向撑破布局的失效模式。
+
+  【为什么要「先写测试」】
+    本套件是在 CSS **未修**的状态下写的，第一次跑就必须是红的。
+    测试照着旧 bug 的症状写、先红后绿，**本身就是负面验证** ——
+    省掉了「改坏 CSS 跑一遍再改回来」这套仪式。哪条断言红不了，
+    说明它写成了不可能违反的形式（空断言），要改断言而不是留着好看。
+    这条纪律来自 tests/icon-size.html：当初发现「连线 N 条 > 0」在连线层
+    被压扁时照样 PASS，若不做负面验证就会把它当成有效断言。
+
+  【断言 ② ③ 为什么按「纵向越界」写】
+    失效形态是文字**垂到画布里**（顶栏无 overflow、有 z-index:20），
+    横向其实不重叠 —— 所以断言是「品牌文字 rect 完全落在顶栏 rect 内」，
+    而不是「不与谱名胶囊相交」。
+
+  【最坏组合为什么要构造而不是靠数据】
+    示例数据的谱名是「我的家族」，胶囊只要 ~154px；而余量告急发生在满格 232px 时。
+    手验根本碰不到那个边界。所以直接把谱名灌长（撑满 max-width:116px 即最坏情况）+
+    人数灌三位数，纯文本注入、不碰数据层。
+
+  【跑法】（需要本地静态服务器 + 无头 Chrome）
+    1) node dev-server.js   →  http://127.0.0.1:5173
+    2) chrome --headless=new --virtual-time-budget=45000 --window-size=1400,880 \
+         --dump-dom http://127.0.0.1:5173/tests/topbar-layout.html
+    结果全在下面 <pre id="out"> 里。
+    ⚠️ 统计时锚到行首（'^(PASS|FAIL)  '）：dump 出来的 DOM 里 <script> 源码
+       也含 'PASS  ' / 'FAIL  ' 字面量，不锚会数多。
+-->
+<iframe id="f"></iframe>
+<pre id="out">RUNNING</pre>
+<script type="module">
+const f = document.getElementById('f');
+const out = document.getElementById('out');
+const L = [];
+let fails = 0;
+const ok = (cond, msg) => { if (!cond) fails++; L.push((cond ? 'PASS  ' : 'FAIL  ') + msg); };
+const info = (msg) => L.push('      ' + msg);
+
+/** 轮询等待，别用固定 setTimeout —— 无头下应用起来的时刻不稳定 */
+async function waitFor(fn, tries = 50, gap = 200) {
+  for (let i = 0; i < tries; i++) {
+    try { if (fn()) return true; } catch (e) { /* 还没就绪 */ }
+    await new Promise((r) => setTimeout(r, gap));
+  }
+  return false;
+}
+
+try { localStorage.clear(); } catch (e) { /* 忽略 */ }
+
+f.addEventListener('load', async () => {
+  await new Promise((r) => setTimeout(r, 600));
+  const doc = f.contentDocument;
+  const win = f.contentWindow;
+
+  try {
+    const ready = await waitFor(() => {
+      const w = doc.querySelector('svg.wires');
+      return !!(w && w.getAttribute('width'));
+    });
+    if (!ready) throw new Error('应用没在预期时间内就绪（svg.wires 一直没拿到 width）');
+    await new Promise((r) => setTimeout(r, 400));
+
+    const topbar = doc.querySelector('.topbar');
+    const brand = doc.querySelector('.brand');
+    const brandMark = doc.querySelector('.brand-mark');
+    const bookSw = doc.querySelector('.book-sw');
+    const bookChip = doc.querySelector('.book-chip');
+    const bcName = doc.querySelector('.bc-name');
+    const bcCount = doc.querySelector('.bc-count');
+
+    if (!topbar || !brand || !brandMark || !bookSw || !bookChip || !bcName || !bcCount) {
+      throw new Error('顶栏结构与预期不符（有元素没找到）');
+    }
+
+    /* 把各控件的实际宽度打出来 —— 余量对不对，看这张表就够 */
+    const dumpWidths = (tag) => {
+      const w = (sel) => {
+        const el = doc.querySelector(sel);
+        return el ? Math.round(el.getBoundingClientRect().width) : -1;
+      };
+      L.push(`      [${tag}] topbar=${Math.round(topbar.getBoundingClientRect().width)}` +
+        ` scroll=${topbar.scrollWidth} client=${topbar.clientWidth}` +
+        ` | brand=${w('.brand')} brandMark=${w('.brand-mark')}` +
+        ` | bookSw=${w('.book-sw')} bookChip=${w('.book-chip')} bcName=${w('.bc-name')}(client ${bcName.clientWidth}` +
+        `/scroll ${bcName.scrollWidth})` +
+        ` | viewSwitch=${w('.view-switch')} search=${w('.search')}` +
+        ` | 只显示姓名=${w('.btn-toggle')} 缩放=${w('.zoom')} 适应=${w('[data-act="fit"]')}` +
+        ` 回中=${w('[data-act="to-me"]')} 添加成员=${w('[data-act="add"]')}`);
+    };
+
+    /* 横向溢出：**只测量，不判定**。
+       首跑（CSS 未修）实测 scrollWidth == clientWidth == 1024 —— 顶栏根本不横向溢出，
+       因为 .brand 一直被压到很窄、把所有缺口吃掉了。也就是说这条断言在修复前后都是绿，
+       是个空断言，按纪律删掉（判定「红不了的断言直接删」）。
+       顶栏的真实失效形态是**纯纵向**的，见 ②。
+       保留测量是为了：① 将来若给顶栏加高地板的控件，这里能立刻看出横向溢出；
+                 ② 核对余量时要用。 */
+    const reportHOverflow = (tag) => {
+      const of = topbar.scrollWidth - (topbar.clientWidth + 1);
+      info(`横向溢出 [${tag}]：scroll ${topbar.scrollWidth} vs client ${topbar.clientWidth}` +
+        `（超出 ${of > 0 ? of + 'px' : '无'}）—— 只测量，不判定`);
+    };
+
+    /* ② 品牌区不许被压扁。
+       ⚠️ 这条断言**换过一次**：原来量的是「品牌文字的 rect 落在顶栏矩形内」——
+       因为当时品牌区是「图标 + 应用名 + 副标题」，而中文可逐字断行 → min-content
+       约等于一个字宽 → 它被压得折行、纵向逃出 52px 顶栏盖住画布
+       （首跑实测 top=-12/bottom=64 与 top=-21/bottom=72）。
+       v0.2.76 把文字**删掉**（窗口标题栏已经写着「家族谱 · 称谓自动推导」），
+       折行的载体不存在了，那条断言随之过时 —— 留着只会因为元素不存在而报错。
+       换成量「品牌区本身不许被压扁」：现在是纯图标（谱标 26 + padding 12 + border 1
+       = 39px），被压就会变成 20px 的小方块。
+       ⚠️ 这也是「空断言/过时断言要删或改」的第四例（前三次见 design.md D3）。 */
+    const checkBrandIntact = (tag) => {
+      const b = brand.getBoundingClientRect();
+      const m = brandMark.getBoundingClientRect();
+      const tb = topbar.getBoundingClientRect();
+      const inside = m.top >= tb.top - 1 && m.bottom <= tb.bottom + 1;
+      ok(b.width >= 35 && inside,
+        `② [${tag}] 品牌区没被压扁且图标完整` +
+        `（brand ${Math.round(b.width)}px ≥ 35，谱标 ${Math.round(m.width)}×${Math.round(m.height)}，` +
+        `垂直方向在顶栏内：${inside}）`);
+    };
+
+    L.push('=== 1. 默认数据（示例谱「我的家族」）===');
+    dumpWidths('默认');
+    reportHOverflow('默认');
+    checkBrandIntact('默认');
+
+    L.push('');
+    L.push('=== 2. 最坏组合：长谱名 + 三位数人数 ===');
+    bcName.textContent = '母亲的娘家那本很长的谱名';
+    bcCount.textContent = '178 人';
+    await new Promise((r) => setTimeout(r, 120));
+    dumpWidths('最坏');
+    reportHOverflow('最坏');
+    checkBrandIntact('最坏');
+
+    /* ④ 谱名的让位情况 —— **已从断言降级为测量**（第三次「空/冗余断言」清理）：
+       它原本是「证明 D2 让谱名参与了收缩」的**机制探针**（谱名被压到 max-width 之下）。
+       但窄态按钮省出的 110px 让书名那边不再有压力，实测谱名停在 116px =
+       它的 max-width 上限，也就是**完整显示**、压根没被压。
+       而它真正防的风险（谱名被压成 0、认不出是哪个谱）现在由 ⑦ 的下限断言守着。
+       机制探针在症状被别的修复掩盖后就成了冗余，按纪律留个测量就行。 */
+    const nameW = bcName.getBoundingClientRect().width;
+    info(`     谱名宽 ${Math.round(nameW)}px（max-width 116）` +
+      `${nameW < 116 ? ' ← 被 flex 压窄' : ' ← 停在上限，完整显示'}` +
+      ` 截断样式 = ${win.getComputedStyle(bcName).textOverflow}`);
+
+    L.push('');
+    L.push('=== 3. 地板核对：谱名压到最短仍可辨识 ===');
+    bcName.textContent = '母亲的娘家那本很长的谱名名字特别长';
+    bcCount.textContent = '178 人';
+    await new Promise((r) => setTimeout(r, 120));
+    {
+      const sw2 = bookSw.getBoundingClientRect().width;
+      const chip2 = bookChip.getBoundingClientRect().width;
+      const icon2 = doc.querySelector('.book-chip > svg').getBoundingClientRect().width;
+      const caret2 = doc.querySelector('.bc-caret').getBoundingClientRect().width;
+      info(`极长名：bookSw=${Math.round(sw2)} bookChip=${Math.round(chip2)} ` +
+        `图标=${Math.round(icon2)} 计数=${Math.round(bcCount.getBoundingClientRect().width)} ` +
+        `箭头=${Math.round(caret2)}`);
+      ok(sw2 >= 90, `谱名压到底仍剩 ≥90px（实际 ${Math.round(sw2)}px）—— 图标/人数/箭头都还在`);
+      ok(icon2 >= 14 && caret2 >= 12,
+        `图标（${Math.round(icon2)}px）与下拉箭头（${Math.round(caret2)}px）未被压缩`);
+      /* ⚠️ v0.2.76：谱名需要一个**下限**，不能被压成 0。
+         修掉胶囊溢出之后 .bc-name 真的开始让位了，让过头 —— 实测默认宽度下
+         `bcName=0`，芯片里只剩书本图标 + 人数 + 箭头，完全认不出是哪个谱。
+         而这个软件里可能有好几本谱，「是哪个谱」的入口不该退化成纯图标。
+         下限 3em（.bc-name 继承 .book-chip 的 --fs-md = 13px，即约 39px，
+         露出三个汉字）。压力会落到家族页签上，但它们 v0.2.76 起已可收缩、
+         标签会进一步省略号，三个页签仍在（断言 5 守住这一点）。 */
+      const nameFloor = bcName.getBoundingClientRect().width;
+      ok(nameFloor >= 30,
+        `⑦ 谱名压到底仍有下限（.bc-name ${Math.round(nameFloor)}px ≥ 30，露约三个汉字）`);
+    }
+
+    L.push('');
+    L.push('=== 4. 搜索结果浮层的可读宽度 ===');
+    {
+      /* 平时这个浮层只有输入后才出现；这里直接摊开量宽度。
+         ⚠️ 它的 CSS 是 `left: 0; right: 0` —— 宽度完全等于定位容器 .search 的宽度。
+         而 .search 没有 min-width，它的地板就是 .search input 自己的左右内边距之和：
+         padding-left 30 + padding-right 32(--sp-8) + border 2 = **64px**。
+         所以顶栏一窄，输入框 64px、浮层也跟着 64px —— 而一行结果里有
+         姓名 / 拼音 / 称谓 / 家族页标签 / 年份 五样东西，64px 里根本没法看。 */
+      const menu = doc.getElementById('searchMenu');
+      const search = doc.querySelector('.search');
+      menu.hidden = false;
+      await new Promise((r) => setTimeout(r, 80));
+      const mRect = menu.getBoundingClientRect();
+      const sRect = search.getBoundingClientRect();
+      info(`search=${Math.round(sRect.width)}px  searchMenu=${Math.round(mRect.width)}px`);
+      ok(mRect.width >= 280,
+        `⑤ 搜索结果浮层宽度 ${Math.round(mRect.width)}px ≥ 280 —— 不被压扁的容器带塌`);
+      ok(Math.abs(mRect.left - sRect.left) < 1,
+        `浮层以搜索框左边缘展开（left ${Math.round(mRect.left)} vs ${Math.round(sRect.left)}）`);
+      menu.hidden = true;
+    }
+
+    L.push('');
+    L.push('=== 5. 家族页签：三个都得在可视区内 ===');
+    {
+      /* ⚠️ 必须灌长标签才能压出问题 —— 示例数据的三个页签是
+         「我的家族」「母亲家族」「妻子家族」，各约 89px，总共约 281px，
+         而最坏情况 .view-switch 只有 263px —— 只差 18px，出问题但很难看得出。
+         真实库的标签是「母亲家族 · 李长顺」这类（app.js/family.js 生成），
+         需求约 450px。这里灌成长标签把差距拉大，让断言有区分度。 */
+      const vs = doc.querySelector('.view-switch');
+      const tabs = [...doc.querySelectorAll('.view-tab')];
+      const LONGS = ['李长顺的家族', '母亲的娘家那本很长的家族', '妻子的娘家那本很长的家族'];
+      tabs.forEach((t, i) => {
+        const lab = t.querySelector('.tab-label');
+        if (lab) lab.textContent = LONGS[i] || ('家族' + (i + 1));
+      });
+      await new Promise((r) => setTimeout(r, 120));
+      /* ⚠️ chipRect 必须在注入长标签**之后**再量 —— 注入会重排整个顶栏，
+         用注入前的 rect 算重叠会得到一个看似 2px 的假数字（实测踩过）。 */
+      const chipRect = bookChip.getBoundingClientRect();
+
+      const vRect = vs.getBoundingClientRect();
+      info(`viewSwitch=${Math.round(vRect.width)}px  scrollWidth=${vs.scrollWidth}` +
+        ` clientWidth=${vs.clientWidth}  页签数=${tabs.length}`);
+      info(`bookChip right=${Math.round(chipRect.right)}`);
+      {
+        /* ⚠️ 顺带量一件可能是回归的事：D2 给 .book-sw 加了 flex: 0 1 auto，
+           若它被压得比 .book-chip 自身更窄，胶囊就会溢出到 .view-switch 上。
+           症状恰好就是「第一个页签的位置和族谱切换按钮重叠」。 */
+        const swRect = bookSw.getBoundingClientRect();
+        const chipW = bookChip.getBoundingClientRect().width;
+        const swW = swRect.width;
+        info(`     bookSw=${Math.round(swW)}  bookChip=${Math.round(chipW)}` +
+          `  ${chipW > swW + 1 ? `★ 胶囊溢出外层 ${Math.round(chipW - swW)}px（D2 引入的回归）` : '胶囊未溢出'}`);
+        ok(chipW <= swW + 1,
+          `⑥ 族谱库胶囊不溢出它的外层（chip ${Math.round(chipW)} ≤ bookSw ${Math.round(swW)}）`);
+        /* ⚠️ rect 量不到的一种溢出：⑥ 只查胶囊的**盒子**有没有超出外层，
+           查不到**盒子内部装不下**——刚性和 min-width 加起来超过盒子宽度时，
+           flex 子项会从盒子右侧溢出（胶囊没有 overflow:hidden，会画出去，
+           而 .view-switch 在 DOM 里靠后、会盖在它上面 → 胶囊右端被页签遮住）。
+           scrollWidth > clientWidth 就是这个信号。 */
+        const cScroll = bookChip.scrollWidth, cClient = bookChip.clientWidth;
+        info(`     chip scrollWidth=${cScroll} clientWidth=${cClient}` +
+          `  ${cScroll > cClient + 1 ? `★ 盒子内部装不下，内容右溢 ${cScroll - cClient}px（rect 查不到）` : '盒子内部装得下'}`);
+        ok(cScroll <= cClient + 1,
+          `⑥ 族谱库胶囊内部装得下（scrollWidth ${cScroll} ≤ clientWidth ${cClient}）—— 不被页签遮住`);
+      }
+
+      let worstOver = 0;
+      tabs.forEach((t, i) => {
+        const r = t.getBoundingClientRect();
+        const over = Math.round(r.right - vRect.right);      // >0 = 右侧被裁
+        const chipOver = Math.round(chipRect.right - r.left); // >0 = 压到族谱按钮上
+        if (over > worstOver) worstOver = over;
+        ok(over <= 1,
+          `第 ${i + 1} 个页签完整在可视区内` +
+          `（right=${Math.round(r.right)} vs 容器 right=${Math.round(vRect.right)}，超出 ${over}px）`);
+        info(`     tab${i + 1} left=${Math.round(r.left)} right=${Math.round(r.right)}` +
+          ` 与 bookChip 左缘重叠 ${chipOver > 0 ? chipOver + 'px' : '无'}`);
+      });
+      info(`最大右侧超出 = ${worstOver}px（>0 说明页签被裁，滚动条又被 scrollbar-width:none 藏掉，` +
+        `用户既看不出「还有更多」也滚不过去）`);
+    }
+
+    L.push('');
+    L.push('=== 6. 右侧控件在窄宽度下不被裁、内容可见 ===');
+    {
+      /* ⚠️ .zoom 身上有 overflow: hidden —— 它是「被遮挡」的高发处：
+         没有 flex 声明（默认 0 1 auto 可收缩），而里面 .zoom-val{min-width:46px}
+         + 两个 30px 按钮是刚性的，一旦外层被压到内容宽度以下，
+         多出来的部分**被自己的 overflow:hidden 裁掉**，按钮就缺一块。 */
+      const zoom = doc.querySelector('.zoom');
+      const zScroll = zoom.scrollWidth, zClient = zoom.clientWidth;
+      /* 搜索框：可用文字宽 = clientWidth - 左右内边距 - 边框。
+         padding-left 30 + padding-right 32(--sp-8) = 62px，
+         而 .search 的地板正好就是这 62+2 —— 意味着文字区只剩 ~2px。 */
+      const input = doc.querySelector('.search input');
+      const ics = win.getComputedStyle(input);
+      const inner = input.clientWidth
+        - parseFloat(ics.paddingLeft) - parseFloat(ics.paddingRight) - 2;
+      info(`zoom: scrollWidth=${zScroll} clientWidth=${zClient}` +
+        `${zScroll > zClient + 1 ? ` ★ 被自己的 overflow:hidden 裁掉 ${zScroll - zClient}px` : ''}`);
+      info(`search input: clientWidth=${input.clientWidth}` +
+        ` padding=${ics.paddingLeft}/${ics.paddingRight} → 文字区仅 ${Math.round(inner)}px`);
+      ok(zScroll <= zClient + 1,
+        `⑧ 缩放组没被裁（scrollWidth ${zScroll} ≤ clientWidth ${zClient}）`);
+      ok(inner >= 40,
+        `⑧ 搜索框可见文字宽 ${Math.round(inner)}px ≥ 40（看得见自己打了什么）`);
+    }
+
+    L.push('');
+    L.push('=== 7. 窄态降级：文字按钮 ↔ 图标态 ===');
+    {
+      /* ⚠️ 这一组跑在第 5 组灌的**最坏标签**（11 个汉字）下。
+         v0.2.78 把 NARROW_LEAVE 从 176 降到 64 之后，「拉宽到 1380 就该退出窄态」
+         这两条在**最坏标签**下不再成立 —— 那是**正确的行为**：
+         11 字标签把 .view-switch 撑到约 540px，1380 宽时文字态的搜索框
+         本来就只剩几 px，窄态理应继续。所以「拉宽后能还原」这条断言
+         改用**真实长度**标签（family.js 实际生成的那种）才有意义。
+         最坏标签下「保持窄态」这件事由第 8、9 组覆盖。 */
+      const REAL_TABS = ['李长顺的家族', '母亲家族 · 王秀兰', '妻子家族 · 王秀兰'];
+      const useRealTabs = async () => {
+        [...doc.querySelectorAll('.view-tab')].forEach((t, i) => {
+          const lab = t.querySelector('.tab-label');
+          if (lab) lab.textContent = REAL_TABS[i] || REAL_TABS[0];
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        doc.dispatchEvent(new Event('resize'));
+        await new Promise((r) => setTimeout(r, 250));
+      };
+      const toggle = doc.getElementById('callToggle');
+      const addBtn = doc.querySelector('[data-act="add"]');
+      const labelVisible = (el) => el.getClientRects().length > 0;
+      const readState = (tag) => {
+        const tLab = toggle.querySelector('.btn-label');
+        const aLab = addBtn.querySelector('.btn-label');
+        const tIco = toggle.querySelector('.btn-ico');
+        const aIco = addBtn.querySelector('.btn-ico');
+        const w = (e) => Math.round(e.getBoundingClientRect().width);
+        const inp = doc.querySelector('.search input');
+        const ics = win.getComputedStyle(inp);
+        const inner = inp.clientWidth - parseFloat(ics.paddingLeft) - parseFloat(ics.paddingRight) - 2;
+        info(`[${tag}] topbar宽=${Math.round(topbar.getBoundingClientRect().width)}` +
+          ` search宽=${Math.round(doc.querySelector('.search').getBoundingClientRect().width)}` +
+          ` viewSwitch=${Math.round(doc.querySelector('.view-switch').getBoundingClientRect().width)}` +
+          ` data-narrow=${topbar.getAttribute('data-narrow') || '（无）'}` +
+          ` 搜索框可用文字宽=${Math.round(inner)}` +
+          ` | 只显示姓名 ${w(toggle)}px 文字可见=${labelVisible(tLab)} Aa图标可见=${labelVisible(tIco)}` +
+          ` | 添加成员 ${w(addBtn)}px 文字可见=${labelVisible(aLab)}`);
+        return {
+          narrow: topbar.hasAttribute('data-narrow'),
+          inner,
+          tW: w(toggle), aW: w(addBtn),
+          tLabVis: labelVisible(tLab), aLabVis: labelVisible(aLab),
+          tIcoVis: labelVisible(tIco),
+        };
+      };
+
+      const narrowState = readState('1024 最坏');
+      ok(narrowState.narrow, `⑨ 空间不足时顶栏进入窄态（data-narrow="true"）`);
+      ok(!narrowState.tLabVis && !narrowState.aLabVis,
+        `⑨ 窄态下两个按钮的文字都不可见（只显示姓名=${narrowState.tLabVis}、添加成员=${narrowState.aLabVis}）`);
+      ok(narrowState.tW >= 30 && narrowState.aW >= 30,
+        `⑨ 降级后按钮仍够点（只显示姓名 ${narrowState.tW}px、添加成员 ${narrowState.aW}px ≥ 30）`);
+      ok(narrowState.tIcoVis, `⑨ 「只显示姓名」在窄态有 Aa 字形图标可辨识`);
+      /* 降级不能牺牲可访问名称：文字被 display:none 后，按钮的名字得另有出处 */
+      const name = toggle.getAttribute('aria-label') || toggle.getAttribute('title') || '';
+      ok(!!name, `⑨ 窄态下按钮仍有可访问名称（aria-label/title = "${name}"）`);
+
+      /* 拉宽 iframe → 应还原文字。
+         ⚠️ 无头下「改 iframe 宽度 → 子窗口收到 resize」这条链路**不可靠**
+         （实测两次跑出来的结果都不一样：一次退出了窄态、一次没退出）。
+         所以这里在改宽度之后**显式派发一次 resize**：
+         我们要验的是 syncTopbarNarrow 的判定逻辑与滞回会不会翻转，
+         不是「浏览器把 resize 转发进 iframe」这个平台保证的 plumbing。
+         ⚠️ 因此本套件**不覆盖**「真实拖动窗口边缘会不会触发判定」——
+            那一环是 `window.addEventListener('resize')` + 60ms 去抖，属平台行为。 */
+      const setWidth = async (px) => {
+        f.style.width = px + 'px';
+        await new Promise((r) => setTimeout(r, 150));
+        win.dispatchEvent(new win.Event('resize'));
+        await new Promise((r) => setTimeout(r, 250));   // 等去抖 60ms + 双 rAF 补判
+      };
+
+      await useRealTabs();
+      await setWidth(1380);
+      const wideState = readState('1380 · 真实标签');
+      ok(!wideState.narrow, `⑨ 窗口拉宽后退出窄态（data-narrow 已移除）`);
+      ok(wideState.tLabVis && wideState.aLabVis, `⑨ 窗口拉宽后两个按钮的文字都回来了`);
+      await setWidth(1024);
+      const backState = readState('回到 1024');
+      ok(backState.narrow, `⑨ 拉回 1024 又回到窄态（说明是可逆的，不是单向降级）`);
+    }
+
+    L.push('');
+    L.push('=== 8. 真实长度标签下，宽窗口的搜索框够不够用 ===');
+    {
+      /* 第 5 组灌的是 11 个汉字的最坏标签，用来逼出边界。但 family.js 真实生成的是
+         `${role}家族 · ${rawName}`（rawName 为空时只有 `${role}家族`），
+         主树页签是 `${视角人名}的家族` —— 实际约 6~8 个汉字。
+         1380 宽时那套最坏标签实测会把 .view-switch 撑到 540px、搜索框压到 64px，
+         **但那是最坏情况，不代表日常使用**。这一节用真实长度复测，回答：
+         「宽窗口搜索框看不见输入」是真的，还是被最坏标签造出来的假象。
+
+         ⚠️ 谱名**不**改回短名：`.bc-name` 的 max-width 就是 116px，长名字才是它的
+            上限态。留着最坏情况意味着「真实标签 + 最长谱名」都还过得去，
+            那日常使用必然也过得去 —— 这一节的结论是偏保守的。
+         （第 7 组已经换成真实长度标签，这里再赋一次是幂等的；
+           留着是为了这一组自己能独立读懂，不用跳到别处才知道标签是哪种。） */
+      const REAL = ['李长顺的家族', '母亲家族 · 王秀兰', '妻子家族 · 王秀兰'];
+      [...doc.querySelectorAll('.view-tab')].forEach((t, i) => {
+        const lab = t.querySelector('.tab-label');
+        if (lab) lab.textContent = REAL[i] || REAL[0];
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      doc.dispatchEvent(new Event('resize'));
+      await new Promise((r) => setTimeout(r, 250));
+
+      const inp = doc.querySelector('.search input');
+      const probe = (tag) => {
+        const cs = win.getComputedStyle(inp);
+        const inner = inp.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 2;
+        info(`${tag} viewSwitch=${Math.round(doc.querySelector('.view-switch').getBoundingClientRect().width)}` +
+          ` search=${Math.round(doc.querySelector('.search').getBoundingClientRect().width)}` +
+          ` 文字区=${Math.round(inner)}` +
+          ` data-narrow=${topbar.getAttribute('data-narrow') || '（无）'}`);
+        return inner;
+      };
+      const inner1024 = probe('真实标签 [1024]');
+
+      f.style.width = '1380px';
+      await new Promise((r) => setTimeout(r, 150));
+      win.dispatchEvent(new win.Event('resize'));
+      await new Promise((r) => setTimeout(r, 250));
+      const inner1380 = probe('真实标签 [1380]');
+
+      /* 这一节要回答的是「宽窗口下搜索框还能用吗」，所以判据是文字区，
+         不管它此刻处在窄态还是文字态 —— 窄态下也已经够宽，那正是修复生效。 */
+      ok(inner1024 >= 40, `⑧ 真实标签 1024 宽：搜索框文字区 ${Math.round(inner1024)}px ≥ 40`);
+      ok(inner1380 >= 40, `⑧ 真实标签 1380 宽：搜索框文字区 ${Math.round(inner1380)}px ≥ 40`);
+
+      f.style.width = '1024px';
+    }
+
+    L.push('');
+    L.push('=== 9. 宽度全程扫描：窄态判定不能自激振荡（v0.2.78 修）===');
+    {
+      /* 用户报「宽度拖到某个大小时顶部状态一直在闪」。根因是**滞回阈值算漏了 24px**：
+         切进窄态会让判据读数涨 130px（两个按钮省 106 + 输入框右内边距省 24），
+         而两个阈值的差只有 120（40 → 160）。只要「切一次涨的量」大于「阈值差」，
+         `160 − 130 < w < 40` 这 10px 区间里就是
+         「切窄态 → 变够宽 → 切回文字态 → 又变窄」无限循环，
+         每个周期改一次顶栏属性，视觉上就是每两帧闪一次。
+
+         ⚠️ **这一组试过三种写法，前两种都在有 bug 的代码上放过了**（都记在这儿）：
+           ① 从窄往宽扫，找 w ∈ (30,40) 的宽度 —— **找不到**。退出窄态的条件是
+              「窄态下测得 > 160」，而窄态读数比宽态高 106px，所以退出时真实宽态 w 已 > 54；
+              一进宽态就越过那条带，扫到的全是「早就稳定了」的区间。
+           ② 从宽往窄扫，停在第一次翻转的宽度上静置 —— **停错了地方**。
+              实测那个宽度上文字区还有 234px（远离阈值），根本没进振荡带。
+           ③ 把阈值抄进测试、断言 `G ≤ 136` —— **等于白测**：136 是「改后」的
+              LEAVE−ENTER，抄进去等于把修复一起抄对了，在修复前的代码上（G=130）照样过。
+           结论：**别去预测振荡发生在哪，也别把阈值抄进测试**。
+           前者由 9b 的写入计数兜住，后者由 9a 直接从应用读阈值解决。
+
+         **判据用 MutationObserver 数「属性真的被写了几次」**，不是比较采样点：
+         振荡发生在一步之内（改一次属性后补判又改回来），
+         只在每步末尾比一次状态的话，它可能已经翻回去了，一个都记不到。
+
+         ⚠️ 这一组**不能用 requestAnimationFrame 等布局落定** —— 无头 Chrome 下
+         rAF 可能根本不触发，await 会永远挂住，整个 harness 卡在 RUNNING
+         （v0.2.78 实施时栽过一次）。读 clientWidth 本身就会强制同步重排，
+         所以 setTimeout 就够。顺带记一条：**app.js 的 recheckNarrow 走的是 rAF，
+         所以它那条路径在无头下测不到**，本组只覆盖 resize 去抖那条路径。 */
+      const setW = async (px, settle) => {
+        f.style.width = px + 'px';
+        await new Promise((r) => setTimeout(r, 40));
+        win.dispatchEvent(new win.Event('resize'));
+        await new Promise((r) => setTimeout(r, settle));   // 必须 > app.js 的 60ms 去抖
+      };
+      const usable = () => {
+        const inp2 = doc.querySelector('.search input');
+        const cs = win.getComputedStyle(inp2);
+        /* 布局意义上的「可见文字宽」（内边距取实时值）。⚠️ **不要拿它当 G**：
+           它会把窄态收内边距的那 24px 也算进去（实测涨 127px），
+           而判据用固定内边距不吃这 24px（真实涨 106px）——
+           方向正好相反：照它判会误报。G 必须读 TH.measure()。
+           留在这里是为了失败时能对比着看。 */
+        return inp2.clientWidth - (parseFloat(cs.paddingLeft) || 0)
+          - (parseFloat(cs.paddingRight) || 0) - 2;
+      };
+
+      /* 9a 直接断言本次修复的那条性质：**判据读数与当前窄态无关**。
+         这比「阈值差 ≥ 收益」准得多 —— v0.2.78 实施时先试过后者，
+         结果在只有一半修复（固定内边距）的代码上就通过了：
+         当时量到收益 103 ≤ 136，可 9b 依然扫出 44 次属性写入。
+         根因是收益**随宽度剧变**（1400 处 103px、1260 处 236px，
+         因为 `.search` 是 `flex:1 1 0%` 且有 `max-width:300px` 封顶，
+         剩余空间的分配不是线性的），任何按「收益上界」配阈值的做法都只在一段宽度上成立。
+         判据与状态无关之后，阈值取多少都不会自激。 */
+      const TH = win.__topbarNarrow;
+      ok(!!TH, `⑪ 应用暴露了 __topbarNarrow（测试要读它的真实阈值，不抄数字）`);
+
+      await setW(1400, 250);
+      if (topbar.hasAttribute('data-narrow')) {         // 先确保在文字态
+        topbar.removeAttribute('data-narrow');
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      const wideU = TH ? TH.measure() : NaN;
+      topbar.setAttribute('data-narrow', 'true');
+      await new Promise((r) => setTimeout(r, 80));
+      const narrowU = TH ? TH.measure() : NaN;
+      const drift = narrowU - wideU;
+      info(`同一个窗口宽度下，判据读数：文字态 ${Math.round(wideU)} → 强制窄态 ` +
+        `${Math.round(narrowU)}（差 ${Math.round(drift)}px）；` +
+        `阈值 ENTER=${TH?.enter} LEAVE=${TH?.leave}，判据右内边距常量=${TH?.padRightRef}`);
+      ok(Math.abs(drift) <= 1,
+        `⑪ 判据读数与当前窄态无关（两种状态下相差 ${Math.round(drift)}px ≤ 1）`);
+
+      /* 9b 行为侧确认：粗扫找到「切入窄态」的翻转宽度，在它附近 2px 细扫
+         （振荡只可能在这一带），再粗扫回去，数**状态净变化**次数。
+
+         ⚠️ 两个坑，都踩过：
+           ① 不能数「属性写入次数」—— 修复后判据在窄态下要临时摘掉
+              `data-narrow` 量一眼再戴回去，那一对写入是**测量行为**不是状态变化。
+              所以按**回调批次比净值**：一次回调前后状态相同就不计。
+           ② 也不能靠「每隔 50ms 采样」—— 无头 Chrome 下 **rAF 可能不触发**，
+              而自激振荡的自持循环正是 rAF 驱动的（recheckNarrow 在 v0.2.78 已删，
+              但 resize 去抖那条路径仍会在拖动时连续翻转）。实测：采样法在
+              「只有一半修复」的代码上照样报 0 次变化，等于白测。
+
+           留这一组是因为它覆盖的是 9a 覆盖不到的东西：**用户拖动窗口时**
+           一连串 resize 事件会不会把状态打乱。9a 管「判据本身对不对」，
+           9b 管「连着来一串事件时稳不稳」。 */
+      await setW(1400, 250);
+      let netFlips = 0;
+      let stateBefore = topbar.getAttribute('data-narrow');
+      const mo = new win.MutationObserver(() => {
+        const now = topbar.getAttribute('data-narrow');
+        if (now !== stateBefore) netFlips++;   // 摘/戴那一对净值不变 → 不计
+        stateBefore = now;
+      });
+      mo.observe(topbar, { attributes: true, attributeFilter: ['data-narrow'] });
+      let flipPx = -1;
+      for (let px = 1400; px >= 1024 && flipPx < 0; px -= 8) {
+        await setW(px, 120);
+        if (topbar.hasAttribute('data-narrow')) flipPx = px;
+      }
+      for (let px = Math.max(1024, flipPx - 24); px <= flipPx + 24; px += 2) await setW(px, 110);
+      for (let px = 1040; px <= 1400; px += 16) await setW(px, 110);
+      mo.disconnect();
+      info(`粗扫到 ${flipPx}px 切入窄态 → 在其附近 ±24px 每 2px 细扫 → 回程 16px 扫到 1400：` +
+        `data-narrow 净变化 ${netFlips} 次` +
+        `，末态${topbar.hasAttribute('data-narrow') ? '窄态' : '文字态'}`);
+      ok(netFlips <= 2,
+        `⑪ 拖动式连续 resize 下状态净变化 ${netFlips} 次（≤2：一去一回）—— 没有抖动`);
+      ok(!topbar.hasAttribute('data-narrow'), `⑪ 扫回 1400px 时已回到文字态（文字按钮还原）`);
+
+      f.style.width = '1024px';
+    }
+
+    L.push('');
+    L.push('=== 10. 窄态 Aa 字形图标的可见大小 ===');
+    {
+      /* 用户报「缩小后 Aa 感觉很小」。
+         「Aa」是全套图标里唯一用 <text> 的（icons.js：路径描不出字形），
+         所以它的大小由 font-size 决定，而别的图标由 24 格 viewBox 里的路径决定 ——
+         两者的「占满程度」天然对不上，得量。 */
+      /* 窄态：Aa 图标只在窄态出现（宽态 .btn-ico 是 display:none，量到的会是 0） */
+      f.style.width = '1024px';
+      await new Promise((r) => setTimeout(r, 40));
+      win.dispatchEvent(new win.Event('resize'));
+      await new Promise((r) => setTimeout(r, 250));
+      if (!topbar.hasAttribute('data-narrow')) {
+        topbar.setAttribute('data-narrow', 'true');
+        await new Promise((r) => setTimeout(r, 120));
+      }
+
+      /* 把 user unit 换算成屏幕像素：svg 实际宽度 / viewBox 宽度 */
+      const inkOf = (svg) => {
+        const vb = svg.viewBox.baseVal;
+        const k = svg.clientWidth / (vb.width || 24);
+        let b = null;
+        try { b = svg.getBBox(); } catch (e) { b = null; }
+        if (!b || (!b.width && !b.height)) {
+          const t = svg.querySelector('text');
+          if (t) { try { b = t.getBBox(); } catch (e) { b = null; } }
+        }
+        return b ? { w: b.width * k, h: b.height * k, k } : null;
+      };
+      const aaSvg = doc.querySelector('.btn-toggle .btn-ico svg');
+      if (!aaSvg) {
+        ok(false, `⑫ 找得到「只显示姓名」的 Aa 图标`);
+      } else {
+        const aa = inkOf(aaSvg);
+        /* ⚠️ `<text>` 的 getBBox 给的是**排版盒**（按字体的 ascent/descent），
+           不是字形墨迹 —— 实测它给 10px，实际可见字高只有约 5.2px。
+           所以下面用「em 尺寸 × 0.72（cap height 比例）」估字高，
+           基准则取同顶栏里**纯路径**图标的 getBBox（那个就是真墨迹）。 */
+        const capPx = (() => {
+          const t = aaSvg.querySelector('text');
+          const fs = t ? (parseFloat(getComputedStyle(t).fontSize) || 0) : 0;
+          return aa ? fs * aa.k * 0.72 : NaN;
+        })();
+
+        /* 基准：邻近的纯路径图标（它们量到的是真墨迹） */
+        const peers = ['.btn-primary[data-act="add"] svg', '.btn-icon[data-act="fit"] svg',
+                       '.btn-icon[data-act="to-me"] svg']
+          .map((s) => doc.querySelector(s)).filter(Boolean)
+          .map((s) => inkOf(s)).filter(Boolean);
+        const peerMin = peers.length ? Math.min(...peers.map((p) => Math.min(p.w, p.h))) : NaN;
+
+        info(`Aa：em ${(capPx / 0.72).toFixed(1)}px × 缩放 ${aa.k.toFixed(3)}` +
+          ` → 估字高 ${capPx.toFixed(1)}px；svg 盒 ${aaSvg.clientWidth}px；` +
+          `排版盒 ${aa.w.toFixed(1)}×${aa.h.toFixed(1)}` +
+          `；邻近路径图标墨迹最小 ${peerMin.toFixed(1)}px` +
+          `（${peers.map((p) => Math.min(p.w, p.h).toFixed(1)).join(' / ')}）`);
+
+        /* 判据一：可见字高要与邻近图标同量级。
+           ⚠️ 阈值定在 85% 不是随手取的 —— 修复前（字号 12.5 + 14px 盒）实测是
+              **63%**，只差一点点就被放过一版：当时阈值写 70%，而那次字号虽然退了、
+              盒子却还是新的 17px，字高被抬到 6.4px 刚好越线，断言照样绿。
+           85% 留的余量足够吸收「cap height 比例随字体在 0.70~0.73 之间浮动」
+           这点误差（±2%），又足够把 63% 那档挡在门外。 */
+        ok(capPx >= peerMin * 0.85,
+          `⑫ Aa 可见字高 ${capPx.toFixed(1)}px ≥ 邻近最小图标墨迹 ${peerMin.toFixed(1)}px 的 85%`);
+        /* 判据二：放大之后不能撑出盒子（两个字母并排，很容易撞边）。
+           留 10% 余量而不是「刚好塞得下」—— <svg> 默认 overflow: hidden，
+           换台机器 --font-ui fallback 到更宽的字体就会把字母裁掉。
+           要求 ≤ 盒宽 90%，等于两侧各留约 5%。 */
+        ok(aa.w <= aaSvg.clientWidth * 0.9,
+          `⑫ Aa 没撑出图标盒（排版宽 ${aa.w.toFixed(1)}px ≤ 盒宽 ${aaSvg.clientWidth}px 的 90%）`);
+      }
+    }
+  } catch (e) {
+    fails++;
+    L.push('FAIL  异常: ' + (e?.stack || e));
+  }
+
+  L.push('');
+  L.push(fails === 0 ? '===== ALL PASSED =====' : `===== ${fails} FAILED =====`);
+  out.textContent = L.join('\n');
+});
+
+// 清完 localStorage 再挂 src，确保 iframe 冷启动
+f.src = '../index.html';
+</script>
+</body>
+</html>

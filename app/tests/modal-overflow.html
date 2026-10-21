@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>弹窗溢出回归 · modal-overflow</title>
+<style>
+  body { margin: 0; font-family: monospace; }
+  iframe { border: 0; width: 760px; height: 560px; display: block; }
+  pre { padding: 8px 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+<!-- 小视口 iframe（760x560）：86vh ≈ 481px，强制弹窗进入「超高滚动」状态。
+     若 .modal > form 不是纵向 flex，modal-body 的 overflow-y:auto 不生效，
+     内容会被 .modal 的 overflow:hidden 直接裁掉 —— 即用户报的「展示不全」。 -->
+<iframe id="f"></iframe>
+<pre id="out">RUNNING</pre>
+<script type="module">
+const f = document.getElementById('f');
+const out = document.getElementById('out');
+const tick = (ms = 300) => new Promise((r) => setTimeout(r, ms));
+const L = [];
+let fails = 0;
+const ok = (cond, msg) => { if (!cond) fails++; L.push((cond ? 'PASS  ' : 'FAIL  ') + msg); };
+
+try { localStorage.clear(); } catch (e) { /* 忽略 */ }
+
+f.addEventListener('load', async () => {
+  await tick(2200);
+  const doc = f.contentDocument;
+  const win = f.contentWindow;
+  const q = (s) => doc.querySelector(s);
+
+  try {
+    L.push('=== 前置：小视口下 app 正常渲染 ===');
+    ok(doc.querySelectorAll('.node').length === 20, `节点数 = ${doc.querySelectorAll('.node').length}（期望 20）`);
+    const vh = win.innerHeight;
+    L.push(`      iframe 视口高 = ${vh}`);
+
+    L.push('');
+    L.push('=== 打开录入弹窗（顶栏「添加成员」）===');
+    doc.querySelector('.topbar [data-act="add"]').click();
+    await tick(500);
+
+    const modal = q('.modal');
+    const form = q('.modal form');
+    const body = q('.modal-body');
+    ok(!!modal, '弹窗已打开');
+    ok(!!form, 'form 存在');
+
+    if (modal && form && body) {
+      const cs = win.getComputedStyle(form);
+      ok(cs.display === 'flex' && cs.flexDirection === 'column',
+        `form 布局 = ${cs.display}/${cs.flexDirection}（期望 flex/column）`);
+
+      const mr = modal.getBoundingClientRect();
+      L.push(`      modal rect: top=${Math.round(mr.top)} bottom=${Math.round(mr.bottom)} 视口高=${vh}`);
+      ok(mr.bottom <= vh + 1 && mr.top >= -1,
+        `弹窗整体在视口内（bottom=${Math.round(mr.bottom)} <= ${vh}）`);
+      ok(mr.height <= vh * 0.86 + 2,
+        `弹窗高 ${Math.round(mr.height)} 不超过 86vh(${(vh * 0.86).toFixed(0)})`);
+
+      L.push(`      modal-body: clientH=${body.clientHeight} scrollH=${body.scrollHeight}`);
+      ok(body.scrollHeight > body.clientHeight,
+        `内容超高时 modal-body 可滚动（scrollH=${body.scrollHeight} > clientH=${body.clientHeight}）`);
+
+      // 关键回归：底部按钮必须可达 —— 滚动到底后保存按钮可见
+      body.scrollTop = body.scrollHeight;
+      await tick(120);
+      const foot = q('.modal-foot');
+      const fr = foot.getBoundingClientRect();
+      const submit = q('button[type="submit"]');
+      const sr = submit.getBoundingClientRect();
+      ok(fr.bottom <= vh + 1 && sr.bottom <= vh + 1 && sr.height > 0,
+        `滚动到底后「添加」按钮可见（button bottom=${Math.round(sr.bottom)} <= ${vh}）`);
+
+      // 滚动容器确实是 modal-body（而不是外层在滚）
+      ok(doc.scrollingElement.scrollTop === 0, '页面本身没有滚动（滚动被 containment 在弹窗内）');
+    }
+
+    L.push('');
+    L.push('=== 编辑弹窗（点节点 → 编辑）===');
+    q('[data-act="cancel"]').click();
+    await tick(400);
+    const me = doc.querySelector('[data-id="p_me"]');
+    me.click();
+    await tick(400);
+    // 面板里应有编辑入口
+    const editBtn = [...doc.querySelectorAll('button')].find((b) => /编辑/.test(b.textContent));
+    ok(!!editBtn, '详情面板存在「编辑」入口');
+    if (editBtn) {
+      editBtn.click();
+      await tick(500);
+      const modal2 = q('.modal');
+      const body2 = q('.modal-body');
+      ok(!!modal2, '编辑弹窗已打开');
+      if (modal2 && body2) {
+        const mr2 = modal2.getBoundingClientRect();
+        ok(mr2.bottom <= win.innerHeight + 1, `编辑弹窗 bottom=${Math.round(mr2.bottom)} 在视口内`);
+        ok(body2.scrollHeight >= body2.clientHeight, 'modal-body 滚动机制生效');
+        body2.scrollTop = body2.scrollHeight;
+        await tick(120);
+        const del = q('[data-act="delete"]');
+        const save = q('button[type="submit"]');
+        ok(!!del && !!save, `滚动到底后删除/保存按钮都在（delete=${!!del} save=${!!save}）`);
+        ok(save.getBoundingClientRect().bottom <= win.innerHeight + 1,
+          `「保存修改」bottom=${Math.round(save.getBoundingClientRect().bottom)} 在视口内`);
+      }
+    }
+  } catch (e) {
+    fails++;
+    L.push('FAIL  异常: ' + (e?.stack || e));
+  }
+
+  L.push('');
+  L.push(fails === 0 ? '===== ALL PASSED =====' : `===== ${fails} FAILED =====`);
+  out.textContent = L.join('\n');
+});
+
+// 清完 localStorage 再挂 src，确保 iframe 冷启动
+f.src = '../index.html';
+</script>
+</body>
+</html>

@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>图标尺寸回归 · icon-size</title>
+<style>
+  body { margin: 0; font-family: monospace; }
+  iframe { border: 0; width: 1380px; height: 880px; position: absolute; left: -99999px; top: 0; }
+  pre { padding: 8px 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+<!--
+  图标尺寸回归（v0.2.75 新增）
+
+  【为什么要有这个套件】
+    v0.2.73 加了「图标尺寸基线」：`:where(svg:not(.wires)) { width:1em; height:1em }`。
+    那条规则的价值全在**两个静默失效**上，而两者都不会报错、不会白屏：
+      ① 兜底被删 / 失效 → 漏写尺寸规则的图标掉回 CSS 默认对象尺寸（300×300），
+         一个图标占满整行面板；
+      ② `:not(.wires)` 被删 → 兜底命中画布连线层，把整棵树的宽高压成 1em，
+         **全树血缘线与婚配线全部消失**。
+    手工验过一次（v0.2.73），但手工验过的东西下一次改动就没了。这套件把两件事钉住。
+
+  【为什么照 modal-overflow.html 抄、而不是加进 e2e.html】
+    e2e.html 在无头 Chrome 下时序不可靠（离屏 iframe + 动态挂 src，--dump-dom 常抓到
+    应用还没起来的中间态，见 README §四的警告）。modal-overflow.html 是同类里无头可跑
+    的那一个，本文照它的骨架：离屏 iframe + 先清 localStorage + 结果 dump 进 #out。
+    但**不学它那个固定 tick(2200)** —— 改成 waitFor 轮询「应用真的准备好了」的标志
+    （svg.wires 上出现 width 属性），时序再慢也能等到。
+
+  【为什么 a/c/d 三组是「现造元素」而不是点真实界面】
+    测的是「CSS 规则是否生效」，不是「某个人的数据长什么样」。直接在 iframe 文档里造出
+    符合选择器的元素去读 computed style，就不需要为了进入 ageUncertain 状态去构造数据集
+    —— 那才是当初「成本高于收益」说辞里唯一站得住的一半。
+    只有 b（.wires）必须用真实 DOM：它要证明的是「脚本注入的尺寸没被静态 CSS 接管」。
+
+  【跑法】（需要本地静态服务器 + 无头 Chrome）
+    1) node dev-server.js   →  http://127.0.0.1:5173
+    2) chrome --headless=new --virtual-time-budget=45000 --window-size=1400,880 \
+         --dump-dom http://127.0.0.1:5173/tests/icon-size.html
+    结果全在下面 <pre id="out"> 里。
+-->
+<iframe id="f"></iframe>
+<pre id="out">RUNNING</pre>
+<script type="module">
+const f = document.getElementById('f');
+const out = document.getElementById('out');
+const L = [];
+let fails = 0;
+const ok = (cond, msg) => { if (!cond) fails++; L.push((cond ? 'PASS  ' : 'FAIL  ') + msg); };
+const near = (a, b, tol = 0.6) => Math.abs(a - b) <= tol;
+
+/* 只声明 viewBox、不写 width/height —— 与 ui/icons.js 的 wrap() 输出形状一致 */
+const SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/></svg>';
+
+/** 轮询等待，别用固定 setTimeout —— 无头下应用起来的时刻不稳定 */
+async function waitFor(fn, tries = 50, gap = 200) {
+  for (let i = 0; i < tries; i++) {
+    try { if (fn()) return true; } catch (e) { /* 还没就绪 */ }
+    await new Promise((r) => setTimeout(r, gap));
+  }
+  return false;
+}
+
+/* 清掉持久化数据再冷启动，否则第二次跑会带上一次录入的人 */
+try { localStorage.clear(); } catch (e) { /* 忽略 */ }
+
+f.addEventListener('load', async () => {
+  await new Promise((r) => setTimeout(r, 600));
+  const doc = f.contentDocument;
+  const win = f.contentWindow;
+
+  try {
+    const ready = await waitFor(() => {
+      const w = doc.querySelector('svg.wires');
+      return !!(w && w.getAttribute('width'));
+    });
+    if (!ready) throw new Error('应用没在预期时间内就绪（svg.wires 一直没拿到 width）');
+    // 就绪后再留一拍，让首屏的 fit() 与面板渲染落定
+    await new Promise((r) => setTimeout(r, 400));
+
+    /* =========================================================
+       0. 兜底规则确实在样式表里（诊断用：红了能一眼看出是规则被删还是行为变了）
+       ========================================================= */
+    L.push('=== 0. 兜底规则在样式表里 ===');
+    let baseRule = null;
+    for (const ss of doc.styleSheets) {
+      let rules;
+      try { rules = ss.cssRules; } catch (e) { continue; }   // 跨域 stylesheet 读不到，跳过
+      for (const r of rules || []) {
+        const s = r.selectorText || '';
+        if (/:where\(\s*svg:not\(\.wires\)\s*\)/.test(s.replace(/\s+/g, ''))) baseRule = r;
+      }
+    }
+    ok(!!baseRule, `兜底选择器存在（${baseRule ? baseRule.selectorText : '未找到'}）`);
+    if (baseRule) {
+      L.push(`      ${baseRule.cssText}`);
+    }
+
+    /* =========================================================
+       1. 兜底生效：漏写尺寸规则的图标按 1em 渲染，而不是 300px
+       ========================================================= */
+    L.push('');
+    L.push('=== 1. 兜底对「没有尺寸规则的容器」生效 ===');
+    const bare = doc.createElement('div');
+    bare.innerHTML = SVG;
+    doc.body.appendChild(bare);
+    {
+      const host = bare.parentElement;
+      const el = bare.querySelector('svg');
+      const em = parseFloat(win.getComputedStyle(host).fontSize);
+      const w = parseFloat(win.getComputedStyle(el).width);
+      const h = parseFloat(win.getComputedStyle(el).height);
+      L.push(`      宿主 font-size = ${em}px，svg computed = ${w}×${h}`);
+      ok(near(w, em), `按 1em 渲染：宽 ${w} ≈ 字号 ${em}`);
+      ok(w < 100, `没有掉进默认对象尺寸（宽 ${w} < 100px，300px 那条路已堵）`);
+    }
+    bare.remove();
+
+    /* =========================================================
+       2. ★ .wires 不受兜底约束（本项目最贵的静默故障）
+       ========================================================= */
+    L.push('');
+    L.push('=== 2. 连线层 .wires 仍由脚本注入尺寸决定 ===');
+    {
+      const wires = doc.querySelector('svg.wires');
+      const attrW = parseFloat(wires.getAttribute('width'));
+      const attrH = parseFloat(wires.getAttribute('height'));
+      const vb = wires.getAttribute('viewBox');
+      const csW = parseFloat(win.getComputedStyle(wires).width);
+      const csH = parseFloat(win.getComputedStyle(wires).height);
+      L.push(`      width/height 属性 = ${attrW}×${attrH}，viewBox = ${vb}`);
+      L.push(`      computed = ${csW}×${csH}`);
+      ok(near(csW, attrW), `computed 宽 ${csW} == 脚本注入的 ${attrW}（未被 CSS 接管）`);
+      ok(near(csH, attrH), `computed 高 ${csH} == 脚本注入的 ${attrH}`);
+      ok(attrW > 100 && csW > 100, `连线层仍是整树量级（${csW}px > 100px，没被压成 1em）`);
+
+      const wires2 = doc.querySelectorAll('.wires path, .wires line').length;
+      ok(wires2 > 10, `连线 ${wires2} 条（树没被压扁）`);
+    }
+
+    /* =========================================================
+       3. 组件级尺寸规则压过兜底（守住 :where() 的 0 特异度）
+       ========================================================= */
+    L.push('');
+    L.push('=== 3. 已有显式尺寸的图标不受兜底影响 ===');
+    {
+      const btnSvg = doc.querySelector('.btn svg');
+      ok(!!btnSvg, '找得到 .btn 里的 svg');
+      if (btnSvg) {
+        const host = btnSvg.parentElement;
+        const em = parseFloat(win.getComputedStyle(host).fontSize);
+        const w = parseFloat(win.getComputedStyle(btnSvg).width);
+        L.push(`      .btn font-size = ${em}px，svg computed 宽 = ${w}`);
+        ok(near(w, 14), `按钮图标 = ${w}px（.btn svg 显式 14px）`);
+        ok(!near(w, em), `没有被兜底改写成 1em（${em}px）—— :where() 的 0 特异度仍生效`);
+      }
+    }
+
+    /* =========================================================
+       4. 两处热点（v0.2.73 修的巨型图标）
+       ========================================================= */
+    L.push('');
+    L.push('=== 4. 称谓推导告警行 / 家族页提示胶囊 ===');
+    {
+      // 4a. .rel-basis.rel-warn —— 告警行（v0.2.74 起是 flex 行）
+      const warn = doc.createElement('div');
+      warn.className = 'rel-basis rel-warn';
+      warn.innerHTML = SVG + '<span>占位告警文案</span>';
+      doc.body.appendChild(warn);
+      {
+        const el = warn.querySelector('svg');
+        const hostFs = parseFloat(win.getComputedStyle(warn).fontSize);
+        const w = parseFloat(win.getComputedStyle(el).width);
+        const disp = win.getComputedStyle(warn).display;
+        L.push(`      .rel-basis font-size = ${hostFs}px，svg computed 宽 = ${w}，容器 display = ${disp}`);
+        ok(near(w, 14), `告警图标 = ${w}px（显式 14px，不是 1em 的 ${hostFs}px）`);
+        ok(disp === 'flex', `告警行是 flex 行（display = ${disp}）`);
+      }
+      warn.remove();
+
+      // 4b. .scope-bar —— 切到姻亲家族页时顶部那条胶囊
+      const bar = doc.createElement('div');
+      bar.className = 'scope-bar on';
+      bar.innerHTML = SVG + '<span>占位胶囊文案</span>';
+      doc.body.appendChild(bar);
+      {
+        const el = bar.querySelector('svg');
+        const hostFs = parseFloat(win.getComputedStyle(bar).fontSize);
+        const w = parseFloat(win.getComputedStyle(el).width);
+        L.push(`      .scope-bar font-size = ${hostFs}px，svg computed 宽 = ${w}`);
+        ok(near(w, 14), `胶囊 info 图标 = ${w}px（显式 14px，不是 1em 的 ${hostFs}px）`);
+      }
+      bar.remove();
+    }
+
+    /* =========================================================
+       5. 面板里真实渲染出来的告警行（若示例数据里正好有人触发）
+          —— 触不触发都不判失败，只在触发了才额外确认一次
+       ========================================================= */
+    L.push('');
+    L.push('=== 5. 真实面板里的告警行（条件性）===');
+    {
+      const realWarn = doc.querySelector('.rel-warn');
+      if (!realWarn) {
+        L.push('      示例数据里没有人触发 ageUncertain / genMismatch —— 跳过（不是失败）');
+        L.push('      要看真实效果：打开一个触发告警的人，图标应为 14px 且与文字对齐');
+      } else {
+        const w = parseFloat(win.getComputedStyle(realWarn.querySelector('svg')).width);
+        ok(near(w, 14), `真实告警行图标 = ${w}px`);
+      }
+    }
+  } catch (e) {
+    fails++;
+    L.push('FAIL  异常: ' + (e?.stack || e));
+  }
+
+  L.push('');
+  L.push(fails === 0 ? '===== ALL PASSED =====' : `===== ${fails} FAILED =====`);
+  out.textContent = L.join('\n');
+});
+
+// 清完 localStorage 再挂 src，确保 iframe 冷启动
+f.src = '../index.html';
+</script>
+</body>
+</html>

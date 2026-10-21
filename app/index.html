@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>家族谱 · 称谓自动推导</title>
+<meta name="description" content="录入家族成员，自动算出每个人该怎么称呼。数据只存本地，不联网。">
+
+<link rel="stylesheet" href="src/styles/tokens.css">
+<link rel="stylesheet" href="src/styles/app.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ================= 顶栏 ================= -->
+  <header class="topbar">
+    <!-- v0.2.76：品牌区只留图标，文字删掉。
+         窗口标题栏（electron/main.js 的 title）已经写着「家族谱 · 称谓自动推导」，
+         顶栏里再写一遍是冗余；而那 66px 在 minWidth 1024 下是真金白银的缺口
+         （顶栏被压得连搜索框都看不见输入、缩放组被自己的 overflow:hidden 裁掉）。
+         ⚠️ 用**删除**而不是 CSS 隐藏 —— 留着不显示的 DOM 只是死重量，
+         而且无障碍树还会照念一遍。 -->
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">谱</div>
+    </div>
+
+    <!-- 族谱库：当前谱 + 下拉切换 / 新建（v0.2.24）。
+         注意它和下面的 #viewSwitch 是两件事：
+         本控件换的是「哪一套数据」，#viewSwitch 换的是「同一套数据里的哪棵树」。 -->
+    <div class="book-sw" id="bookSw">
+      <button class="book-chip" id="bookChip" aria-haspopup="true" aria-expanded="false"
+              aria-label="切换族谱">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" aria-hidden="true">
+          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+        </svg>
+        <span class="bc-name" id="bookChipName">我的家族</span>
+        <span class="bc-count" id="bookChipCount">0 人</span>
+        <span class="bc-caret" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+               stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+        </span>
+      </button>
+      <div class="book-menu" id="bookMenu" role="menu" aria-label="族谱列表" hidden></div>
+    </div>
+
+    <!-- 家族切换（主树 / 各姻亲原生家族） -->
+    <div class="view-switch" id="viewSwitch" role="tablist" aria-label="切换家族"></div>
+
+    <!-- 视角切换不再放顶栏：人物一多就不好找了，改成点开某人的详情面板
+         点「设为我的视角」，见 src/ui/panel.js -->
+
+    <!-- 搜索。v0.2.55 起多了 #searchMenu 结果浮层：
+         刻意**不走 overlay** —— overlay 一打开就会通知主进程禁用一组原生菜单，
+         搜索框只是个临时浮层，没必要把菜单锁掉（与 #bookMenu 同一考量）。
+         ⚠️ 容器要带 id="searchSw"：「点到别处就收起」判断的是**整个搜索控件**
+         （输入框 + 浮层）在不在点击路径上，不是只有浮层 —— 只认浮层的话，
+         点一下输入框就会把列表收掉，「点回输入框弹列表」永远做不到。 -->
+    <div class="search" id="searchSw">
+      <svg class="search-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.35-4.35"/>
+      </svg>
+      <label class="sr-only" for="searchInput">搜索姓名、称呼或拼音</label>
+      <input id="searchInput" type="search" autocomplete="off"
+             placeholder="姓名 / 称呼 / 拼音（lcs 或 lichangshun）"
+             role="combobox" aria-expanded="false" aria-controls="searchMenu" aria-autocomplete="list">
+      <kbd>⌘K</kbd>
+      <div class="search-menu" id="searchMenu" role="listbox" aria-label="搜索结果" hidden></div>
+    </div>
+
+    <!-- 这里原来有一个 <div class="spacer">（纯占位，把右侧按钮推到最右）。
+         v0.2.77 删掉了：它跟 .search 同为 flex:1，会把剩余空间对半分，
+         而 .search 有 62px 的内边距地板 —— 分到 82px 宽时文字区只剩 16px，
+         等于「宽窗口下看不见自己打了什么」。改成 .btn-toggle 上的 margin-left:auto，
+         只在 .search 长满 max-width 之后才吸收剩余。 -->
+
+    <!-- 「只显示姓名」（v0.2.54）：默认关闭 = 与以前完全一致；打开后树与详情面板
+         只按姓名认人。刻意不给原生菜单第二入口 —— v0.2.28 视角切换就是因为
+         两处都能切才让人分不清哪个是真的。 -->
+    <button class="btn btn-ghost btn-toggle" id="callToggle" data-act="toggle-call"
+            aria-pressed="false" title="只显示姓名：隐藏称谓，只按姓名认人"
+            aria-label="只显示姓名">
+      <span class="toggle-dot" aria-hidden="true"></span>
+      <!-- 窄态降级时只留这两个图标（见 app.css 的 .topbar[data-narrow] 规则）。
+           aria-label 是必需的：窄态下 .btn-label 被 display:none，
+           按钮的可访问名称会跟着一起消失。 -->
+      <span class="btn-ico" aria-hidden="true"></span>
+      <span class="btn-label">只显示姓名</span>
+    </button>
+
+    <div class="zoom" id="zoom" role="group" aria-label="缩放">
+      <button data-act="zoom-out" aria-label="缩小">−</button>
+      <div class="zoom-val" id="zoomVal">100%</div>
+      <button data-act="zoom-in" aria-label="放大">+</button>
+    </div>
+
+    <button class="btn btn-ghost btn-icon" data-act="fit" title="适应窗口（F）" aria-label="适应窗口">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/>
+      </svg>
+    </button>
+
+    <!-- 「回到当前视角」：我居中 + 严格 100%。人越多 fit() 缩得越小，改关系又会重排整棵树，
+         这两条都会让人「不知道自己现在看的是哪儿」，需要一个一键找回的动作。 -->
+    <button class="btn btn-ghost btn-icon" data-act="to-me" title="回到当前视角：我摆到正中，放大到 100%（V）" aria-label="回到当前视角">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="7"/>
+        <circle cx="12" cy="12" r="2.2" fill="currentColor" stroke="none"/>
+        <path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/>
+      </svg>
+    </button>
+
+    <button class="btn btn-primary" data-act="add" title="添加成员（N）" aria-label="添加成员">
+      <span class="btn-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </span>
+      <span class="btn-label">添加成员</span>
+    </button>
+  </header>
+
+  <!-- ================= 主体三栏 ================= -->
+  <div class="body">
+
+    <!-- 左：导航轨（内容由 app.js 注入） -->
+    <nav class="rail" id="rail" aria-label="功能导航"></nav>
+
+    <!-- 中：家谱树 -->
+    <section class="view on" id="viewTree" aria-label="家谱树视图">
+      <div class="stage" id="stage">
+        <div class="stage-bg" id="stageBg"></div>
+
+        <!-- 坐标容器：节点 + 连线都在这里，一起被缩放平移 -->
+        <div class="canvas" id="canvas">
+          <svg class="wires" id="wires" width="2600" height="1400" aria-hidden="true"></svg>
+        </div>
+
+        <!-- 空状态 -->
+        <div class="stage-empty" id="stageEmpty" style="display:none">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true">
+            <path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/>
+          </svg>
+          <h3>还没有录入任何成员</h3>
+          <p>从「添加成员」开始，先加上自己和父母。<br>称呼会随着录入自动出现。</p>
+        </div>
+
+        <!-- 图例 -->
+        <div class="legend" aria-hidden="true">
+          <div class="legend-row"><span class="dot" style="background:var(--paternal)"></span>父系血缘</div>
+          <div class="legend-row"><span class="dot" style="background:var(--maternal)"></span>母系血缘</div>
+          <div class="legend-row"><span class="dot" style="background:var(--affinal)"></span>姻亲</div>
+          <div class="legend-row"><span class="dot" style="background:var(--deceased)"></span>已故</div>
+          <hr>
+          <div class="legend-row"><span class="ln"></span>血缘</div>
+          <div class="legend-row"><span class="ln marry"></span>婚配</div>
+          <hr>
+          <div class="legend-row" style="color:var(--ink-400)">滚轮平移 · ⌘/Ctrl+滚轮缩放 · 拖拽移动</div>
+        </div>
+
+        <!-- 视角提示条（不在主树时出现） -->
+        <div class="scope-bar" id="scopeBar" role="status"></div>
+      </div>
+    </section>
+
+    <!-- 中：数据体检 -->
+    <section class="view" id="viewCheck" aria-label="数据体检视图">
+      <div class="check-wrap" id="checkWrap"></div>
+    </section>
+
+    <!-- 右：详情面板 -->
+    <aside class="panel" id="panel" aria-label="成员详情"></aside>
+
+    <button class="panel-handle" id="panelHandle" title="收起 / 展开详情面板">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+        <path d="M15 18l-6-6 6-6"/>
+      </svg>
+      <span>详情</span>
+    </button>
+
+  </div>
+</div>
+
+<!-- 弹窗层 -->
+<div class="overlay" id="overlay"></div>
+
+<!-- 轻提示 -->
+<div class="toast-wrap" id="toastWrap" role="status" aria-live="polite"></div>
+
+<!-- html2canvas（导出图片用，MIT）。刻意走经典脚本而不是 ESM import：
+     它是唯一需要「先于 src/app.js 就位」的第三方库，而经典脚本一定先于
+     type="module" 执行，顺序不用靠 dynamic import 兜。
+     打包时 node_modules 会被 electron-builder 一起收进 asar（*.map 已被排除）。 -->
+<script src="node_modules/html2canvas/dist/html2canvas.min.js"></script>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>
