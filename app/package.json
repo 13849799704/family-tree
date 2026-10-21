@@ -28,7 +28,8 @@
     "test:delrepro": "node scripts/launch.js tests/repro-delete-current.test.js",
     "db:inspect": "node scripts/inspect-db.js",
     "dist": "electron-builder --win",
-    "dist:dir": "electron-builder --win --dir"
+    "dist:dir": "electron-builder --win --dir",
+    "dist:publish": "electron-builder --win --publish always"
   },
   "engines": {
     "node": ">=18"
@@ -118,6 +119,14 @@
     },
     "portable": {
       "artifactName": "Genogram-Portable-${version}.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "13849799704",
+        "repo": "family-tree",
+        "releaseType": "release"
+      }
+    ]
   }
 }

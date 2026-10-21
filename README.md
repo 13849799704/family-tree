@@ -406,6 +406,7 @@ npm run test:delete  # 删除人员流程回归（系统级物理按键）
 ```bash
 npm run dist        # 完整构建：NSIS 安装包 + 免安装版
 npm run dist:dir    # 只打包不生成安装器（快，用来验证 asar 内容）
+npm run dist:publish # 构建 + 自动发到 GitHub Releases（见 §7.3）
 ```
 
 > ⚠️ **本机打包必现 EPERM**：`npm run dist` 会在 electron-builder 的打包阶段挂掉，
@@ -432,9 +433,34 @@ npm run dist:dir    # 只打包不生成安装器（快，用来验证 asar 内�
 |---|---|
 | `Genogram-Setup-0.2.80.exe` | **安装版**（约 107 MB）。安装目录在向导里自选，默认 `C:\Users\<用户名>\AppData\Local\Programs\家族谱` |
 | `Genogram-Portable-0.2.80.exe` | **免安装版**（约 106.8 MB）。双击就跑，适合放 U 盘随身带 |
+| `Genogram-Setup-0.2.80.exe.blockmap` | 安装版的差分索引，给「自动更新」用（尚未实现，见 §9） |
 | `win-unpacked\` | 解包后的程序目录，调试用 |
 
 > 源码当前版本见 §1 —— `dist/` 里的 exe 版本号会落后于源码；下次 `npm run dist` 前先核对版本号。
+
+**发布到 GitHub Releases**（别人从仓库页面直接下载安装包走这条路）：
+
+```bash
+$env:GH_TOKEN = gh auth token
+npm run dist:publish
+```
+
+`dist:publish` 就是 `dist` 加一个 `--publish always`：构建完成后自动在仓库上创建以版本号命名的
+Release（tag 形如 `v0.2.85`），并把安装版、免安装版和 `.blockmap` 一并挂上去。三个坑：
+
+- **必须先设 `GH_TOKEN`**。electron-builder 只读环境变量，**不会**复用 `gh` 的登录态
+  （见 `node_modules/electron-publish/out/gitHubPublisher.js` 第 25 行，只认
+  `GITHUB_RELEASE_TOKEN` / `GH_TOKEN` / `GITHUB_TOKEN`）。`gh` 本身已登录且带 `repo` 权限，
+  `gh auth token` 取出来即可。
+- **版本号必须是新的**。tag 已存在时发布会失败中止 —— 这是防呆，别绕过；确实要重发同一版，
+  先去 Releases 页面把那个 tag 删掉。
+- **本机打包仍受 §7.2 的 EPERM 限制**，所以实际发布要跑这条（`dist:publish` 里没带 `electronDist`，
+  在本机会挂在 rename 上）：
+
+  ```bash
+  $env:GH_TOKEN = gh auth token
+  npx electron-builder --win --publish always --config.electronDist="D:\族谱pc端项目\app\node_modules\electron\dist"
+  ```
 
 ### 7.4 装包后必须验的三件事
 
